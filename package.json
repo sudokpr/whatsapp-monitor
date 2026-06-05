@@ -1,0 +1,28 @@
+{
+  "name": "whatsapp-group-monitor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "py:sync": "unset VIRTUAL_ENV; uv sync --prerelease allow",
+    "digest": "scripts/digest/combined_6hr_digest.sh",
+    "digest:preview": "DIGEST_PROCESSING_MODE=preview SEND_TELEGRAM=false scripts/digest/combined_6hr_digest.sh"
+  },
+  "dependencies": {
+    "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "^6.7.18",
+    "express": "^5.1.0",
+    "pino": "^9.7.0",
+    "qrcode-terminal": "^0.12.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.0.3",
+    "@types/qrcode-terminal": "^0.12.2",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3"
+  }
+}

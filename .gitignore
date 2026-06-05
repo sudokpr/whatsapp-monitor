@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+.venv/
+
+# Build output
+dist/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# WhatsApp/runtime data. This can include auth keys, phone numbers, group IDs,
+# messages, digest history, local config, logs, and model state.
+data/
+!data/.gitkeep
+!data/*.example.*
+!data/*.sample.*
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Tool/cache files
+.DS_Store
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+scripts/digest/.combined-digest.lock/
