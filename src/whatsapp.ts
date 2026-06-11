@@ -67,7 +67,11 @@ export class WhatsappMonitor {
       }
 
       if (connection === "open") {
-        await this.discoverGroups(sock);
+        try {
+          await this.discoverGroups(sock);
+        } catch (error) {
+          console.warn("Could not discover WhatsApp groups; continuing message capture.", error);
+        }
       }
 
       if (connection === "close") {
