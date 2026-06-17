@@ -69,6 +69,8 @@ client currently resolves through pre-release packages.
 
 Ollama digest generation is optional and disabled by default. Set
 `ENABLE_OLLAMA=true`, `OLLAMA_URL`, and `OLLAMA_MODEL` in `.env` to enable it.
+For Ollama Cloud, use `OLLAMA_URL=https://ollama.com` and set
+`OLLAMA_API_KEY`.
 Set `ENABLE_MODEL_COMPARISON=false` to skip the comparison summary.
 
 DSPy prompt generation is configured in `scripts/digest/config.sh`. By default

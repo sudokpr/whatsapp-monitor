@@ -65,6 +65,9 @@ Rules:
 {_base_rules()}
 Start with a 1-2 line overall summary.
 Use conversation headings from the partial summaries. Keep names like "Rides 2 ( Full )" and "BLR Cyclists Buy/Sell requests".
+If the same conversation heading appears in multiple partial summaries, merge it into one section.
+Do not repeat the same event, debate, rule, sale item, or action just because it appeared in multiple chunks.
+Write one consolidated "Next actions:" line at the end only when there are concrete actions.
 Do not invent broad category headings like "Personal Updates", "India and Global News", or "Motorcycling and Cycling".
 Do not editorialize or compare importance unless the messages explicitly do that.
 

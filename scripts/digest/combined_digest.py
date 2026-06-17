@@ -63,6 +63,7 @@ RETENTION_DAYS = int(os.environ.get("RETENTION_DAYS") or 30)
 LOG_FILE = os.environ.get("LOG_FILE") or str(REPO_DIR / "data" / "summary.log")
 OLLAMA_URL = os.environ.get("OLLAMA_URL") or "http://localhost:11434"
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL") or "llama3.1"
+OLLAMA_API_KEY = (os.environ.get("OLLAMA_API_KEY") or "").strip()
 OLLAMA_MODELS = parse_model_list(
     os.environ.get("OLLAMA_MODELS_LIST")
     or os.environ.get("OLLAMA_MODELS"),
@@ -319,8 +320,10 @@ def split_digest_for_ollama(raw_digest, max_chars):
 def call_ollama_prompt(model, prompt, label="request"):
     try:
         log(f"Ollama {model} {label}: prompt_size={len(prompt)} chars, timeout={OLLAMA_TIMEOUT_SECONDS}s")
+        headers = {"Authorization": f"Bearer {OLLAMA_API_KEY}"} if OLLAMA_API_KEY else None
         response = requests.post(
             f"{OLLAMA_URL}/api/chat",
+            headers=headers,
             json={
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
@@ -546,14 +549,6 @@ def main():
 
     sent_any = False
     model_summaries = []
-    ollama_summaries = {}
-    if ENABLE_OLLAMA:
-        ollama_summaries, ollama_sent_any = call_ollama_models(raw_digest)
-        model_summaries.extend((f"Ollama {model}", summary) for model, summary in ollama_summaries.items())
-        sent_any = ollama_sent_any or sent_any
-    else:
-        log("Ollama disabled by configuration")
-
     codex_summary = ""
     if ENABLE_CODEX:
         codex_summary = call_codex(prompt)
@@ -564,6 +559,17 @@ def main():
             log("Codex LLM returned no summary")
     else:
         log("Codex LLM disabled by configuration")
+
+    ollama_summaries = {}
+    if ENABLE_OLLAMA and not codex_summary:
+        log("Codex summary unavailable; trying Ollama fallback")
+        ollama_summaries, ollama_sent_any = call_ollama_models(raw_digest)
+        model_summaries.extend((f"Ollama {model}", summary) for model, summary in ollama_summaries.items())
+        sent_any = ollama_sent_any or sent_any
+    elif ENABLE_OLLAMA:
+        log("Ollama fallback skipped: Codex summary succeeded")
+    else:
+        log("Ollama disabled by configuration")
 
     if not ollama_summaries and not codex_summary:
         raise RuntimeError("All configured LLMs failed; state was not advanced")
