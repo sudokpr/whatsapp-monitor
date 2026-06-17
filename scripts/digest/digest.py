@@ -25,6 +25,11 @@ digest_message_char_limit = int(os.environ.get('DIGEST_MESSAGE_CHAR_LIMIT', 0))
 context_message_char_limit = int(os.environ.get('CONTEXT_MESSAGE_CHAR_LIMIT', 0))
 participants_api = os.environ.get('PARTICIPANTS_API') or 'http://localhost:3000/participants'
 state_key = os.environ.get('DIGEST_STATE_KEY', 'last_processed_ts')  # Allow per-LLM state keys
+excluded_group_ids = {
+    group_id.strip()
+    for group_id in re.split(r'[\s,]+', os.environ.get('DIGEST_EXCLUDED_GROUP_IDS', ''))
+    if group_id.strip()
+}
 
 # IST timezone
 ist_tz = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
@@ -60,6 +65,26 @@ def message_timestamp(message):
 def is_whatsapp_status(message):
     return message.get('groupId') == 'status@broadcast'
 
+def is_excluded_group(message):
+    return message.get('groupId') in excluded_group_ids
+
+def is_extractor_metadata_noise(message):
+    text = (message.get('text') or '').strip()
+    if not text:
+        return False
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return False
+
+    metadata_prefixes = ('groupId:', 'remoteJid:', 'id:', 'participant:', 'text:', 'url:')
+    if not all(line.startswith(metadata_prefixes) for line in lines):
+        return False
+
+    # These rows were produced by an overly broad extractor fallback from
+    # reactions/protocol/media metadata; they are not user-visible messages.
+    return any(line.startswith(('groupId:', 'remoteJid:', 'url:')) for line in lines)
+
 # Load messages
 all_msgs = []
 try:
@@ -70,6 +95,10 @@ try:
             try:
                 message = json.loads(line)
                 if is_whatsapp_status(message):
+                    continue
+                if is_excluded_group(message):
+                    continue
+                if is_extractor_metadata_noise(message):
                     continue
                 all_msgs.append(message)
             except json.JSONDecodeError as e:

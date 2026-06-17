@@ -19,6 +19,11 @@ The API listens on port `3000` unless `PORT` is set:
 - `GET /groups` returns discovered groups from the active connection
 - `GET /listings` returns the last 100 stored group messages
 - `GET /stats` returns daily message counts and top users/groups
+- `GET /metrics` returns Prometheus text metrics for monitor health, WhatsApp
+  connection state, message capture, persistence, and API requests
+- `POST /send-message` sends a WhatsApp text message through the active
+  Baileys connection with JSON body `{ "jid": "...", "text": "..." }`.
+  If `WHATSAPP_SEND_TOKEN` is set, pass it as `x-api-key` or a bearer token.
 
 ## Group config
 
@@ -44,8 +49,7 @@ apply without restarting the process.
 
 The active digest pipeline has been moved into this repo under
 `scripts/digest/`. It reads `data/messages.jsonl`, writes digest state and
-history to `data/digests.db`, and sends summaries through
-`scripts/telegram/send_telegram_topic.py`.
+history to `data/digests.db`, and stores configured model summaries.
 
 Python dependencies are managed with `uv` from `pyproject.toml`:
 
@@ -58,10 +62,19 @@ Local digest settings live in `.env` and are loaded by
 `scripts/digest/config.sh`. Use `.env.example` as the template for model
 selection and feature toggles.
 
-`npm run digest` runs the configured digest summarizers, sends Telegram
-notifications when configured, stores each model output, optionally sends a
-model comparison, and advances `digest_state` after a successful run.
-`npm run digest:preview` exercises the pipeline without Telegram sends or state
+`npm run digest` runs the configured digest summarizers, stores each model
+output, optionally sends a model comparison, and advances `digest_state` after a
+successful run. Telegram delivery is disabled by default; set
+`SEND_TELEGRAM=true` only when you want to mirror summaries there.
+WhatsApp delivery is available through the local monitor API; set
+`SEND_WHATSAPP=true` and `WHATSAPP_DIGEST_JID` to a contact, LID, or group JID
+when you want digest summaries sent on WhatsApp. For sending to the same
+account, the LID route may be required for readable delivery. If the monitor
+uses `WHATSAPP_SEND_TOKEN`, set the same value for the digest process. Outbound
+summaries start with the digest window and message/group counts.
+Set `DIGEST_EXCLUDED_GROUP_IDS` to a comma- or space-separated list of group
+JIDs to keep delivery/control groups out of future summaries.
+`npm run digest:preview` exercises the pipeline without delivery sends or state
 advancement.
 
 `npm run py:sync` uses `uv sync --prerelease allow` because the Codex Python
@@ -83,3 +96,22 @@ Example cron entry:
 ```cron
 0 6,10,14,18,22 * * * cd /path/to/whatsapp-group-monitor && scripts/digest/combined_6hr_digest.sh >> data/summary.log 2>&1
 ```
+
+### Prometheus metrics
+
+The monitor exposes scrape metrics at `GET /metrics`.
+
+The digest cron job can also emit one Prometheus text snapshot per run:
+
+```bash
+PROMETHEUS_METRICS_ENABLED=true
+PROMETHEUS_METRICS_FILE=data/metrics/whatsapp_digest.prom
+PROMETHEUS_METRICS_PUSH_URL=
+PROMETHEUS_METRICS_USERNAME=
+PROMETHEUS_METRICS_PASSWORD=
+```
+
+`PROMETHEUS_METRICS_PUSH_URL` posts the text exposition payload to a compatible
+ingestion endpoint, such as a Pushgateway grouping URL or a text import endpoint.
+Strict Prometheus remote-write endpoints require protobuf/snappy encoding; point
+those through an agent or gateway that accepts text exposition.

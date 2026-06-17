@@ -12,7 +12,7 @@ import os
 
 
 def _base_rules() -> str:
-    return """Output only the digest content. Do not say "Here is", "Telegram-ready", or any other preamble.
+    return """Output only the digest content. Do not say "Here is", "ready to send", or any other preamble.
 Use plain text only: no markdown bold, no markdown tables.
 Preserve conversation headings for meaningful new messages.
 Use previous-window context only to explain replies and references; do not report it as new activity.
@@ -27,7 +27,7 @@ End with "Next actions:" only if there is something actionable; do not leave an 
 
 
 def _static_main_prompt(raw_digest: str) -> str:
-    return f"""You are summarising WhatsApp community conversations for Telegram.
+    return f"""You are summarising WhatsApp community conversations into a plain-text digest.
 The raw digest below contains only new messages since the last successful digest run, grouped by conversation name, with timestamps, anonymised sender labels, and text. Auto-Strava noise is mostly filtered.
 Some active groups may include a clearly marked previous-window context section. Use that context only to understand replies and references; do not report it as new activity unless it is directly needed to explain a new message.
 Write a detailed but readable plain-text digest for someone who was offline.
@@ -46,7 +46,7 @@ RAW DIGEST:
 
 
 def _static_chunk_prompt(raw_digest_chunk: str, chunk_number: int, chunk_count: int) -> str:
-    return f"""You are summarising one chunk of a larger WhatsApp digest for Telegram.
+    return f"""You are summarising one chunk of a larger WhatsApp plain-text digest.
 This is chunk {chunk_number} of {chunk_count}. Summarise only the conversations present in this chunk.
 
 Rules:
@@ -59,7 +59,7 @@ RAW DIGEST CHUNK:
 
 def _static_merge_prompt(chunk_summaries: str) -> str:
     return f"""You are merging partial summaries from a chunked WhatsApp digest.
-Write one final plain-text digest for Telegram.
+Write one final plain-text digest.
 
 Rules:
 {_base_rules()}
@@ -94,7 +94,7 @@ def _dspy_prompt(task: str, payload: str, fallback: str, **metadata: object) -> 
         dspy.configure(lm=dspy.LM(lm_model, **lm_kwargs))
 
         class WhatsAppPromptSpec(dspy.Signature):
-            """Create a prompt for an LLM that summarizes WhatsApp digests for Telegram."""
+            """Create a prompt for an LLM that summarizes WhatsApp digests as plain text."""
 
             task: str = dspy.InputField()
             rules: str = dspy.InputField()
@@ -118,7 +118,7 @@ def _dspy_prompt(task: str, payload: str, fallback: str, **metadata: object) -> 
 def build_prompt(raw_digest: str) -> str:
     fallback = _static_main_prompt(raw_digest)
     return _dspy_prompt(
-        "Summarize a full WhatsApp digest into a Telegram-ready plain-text update.",
+        "Summarize a full WhatsApp digest into a plain-text update.",
         f"RAW DIGEST:\n{raw_digest}",
         fallback,
         kind="full",
@@ -142,7 +142,7 @@ def build_chunk_prompt(raw_digest_chunk: str, chunk_number: int, chunk_count: in
 def build_merge_prompt(chunk_summaries: str) -> str:
     fallback = _static_merge_prompt(chunk_summaries)
     return _dspy_prompt(
-        "Merge partial WhatsApp digest summaries into one final Telegram update.",
+        "Merge partial WhatsApp digest summaries into one final plain-text update.",
         f"PARTIAL SUMMARIES:\n{chunk_summaries}",
         fallback,
         kind="merge",
@@ -156,7 +156,7 @@ def build_model_comparison_prompt(model_summaries: list[tuple[str, str]], refere
         formatted.append(f"MODEL: {label}\nSUMMARY:\n{summary}")
     joined = "\n\n---\n\n".join(formatted)
     return f"""You are comparing multiple model-generated WhatsApp digest summaries for the same raw message window.
-Use the reference raw digest as the source of truth. Write a concise Telegram-ready comparison for the user.
+Use the reference raw digest as the source of truth. Write a concise plain-text comparison for the user.
 
 Rules:
 - Output only the comparison. Do not include a preamble like "Here is".

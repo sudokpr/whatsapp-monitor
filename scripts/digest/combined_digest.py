@@ -28,11 +28,13 @@ from prompt_builder import (
     build_model_comparison_prompt,
     build_prompt,
 )
+from prometheus_metrics import emit_digest_metrics
 from send_telegram_topic import send_text
 
 ENV_FILE = REPO_DIR / ".env"
 STATE_KEY = os.environ.get("DIGEST_STATE_KEY", "last_processed_ts")
 LEGACY_STATE_KEYS = ("last_processed_ts", "last_processed_ts_gemini", "last_processed_ts_ollama")
+RUN_STARTED_AT = datetime.datetime.now().timestamp()
 
 
 def load_env_file(path):
@@ -81,7 +83,13 @@ ENABLE_MODEL_COMPARISON = (
 ).strip().lower() == "true"
 PROCESSING_MODE = (os.environ.get("DIGEST_PROCESSING_MODE") or "process").strip().lower()
 DELETE_DIGEST_MD = (os.environ.get("DELETE_DIGEST_MD") or "false").strip().lower() == "true"
-SEND_TELEGRAM = (os.environ.get("SEND_TELEGRAM") or "true").strip().lower() == "true"
+SEND_TELEGRAM = (os.environ.get("SEND_TELEGRAM") or "false").strip().lower() == "true"
+SEND_WHATSAPP = (os.environ.get("SEND_WHATSAPP") or "false").strip().lower() == "true"
+WHATSAPP_DIGEST_JID = (os.environ.get("WHATSAPP_DIGEST_JID") or "").strip()
+WHATSAPP_SEND_API = os.environ.get("WHATSAPP_SEND_API") or "http://localhost:3000/send-message"
+WHATSAPP_SEND_TOKEN = (os.environ.get("WHATSAPP_SEND_TOKEN") or "").strip()
+WHATSAPP_TIMEOUT_SECONDS = int(os.environ.get("WHATSAPP_TIMEOUT_SECONDS") or 30)
+WHATSAPP_MAX_LEN = int(os.environ.get("WHATSAPP_MAX_LEN") or 3500)
 
 
 IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
@@ -380,9 +388,10 @@ def call_ollama(model, raw_digest):
     return joined
 
 
-def call_ollama_models(raw_digest):
+def call_ollama_models(raw_digest, metadata):
     summaries = {}
-    sent_any = False
+    telegram_sent_any = False
+    whatsapp_sent_any = False
     for model in OLLAMA_MODELS:
         log(f"Calling Ollama {model}")
         try:
@@ -394,9 +403,11 @@ def call_ollama_models(raw_digest):
             log(f"Ollama {model} returned no summary")
             continue
         summaries[model] = summary
-        sent_any = send_to_telegram(f"Ollama digest ({model})", summary) or sent_any
+        telegram_sent, whatsapp_sent = send_summary(f"Ollama digest ({model})", summary, metadata)
+        telegram_sent_any = telegram_sent or telegram_sent_any
+        whatsapp_sent_any = whatsapp_sent or whatsapp_sent_any
 
-    return summaries, sent_any
+    return summaries, telegram_sent_any, whatsapp_sent_any
 
 
 def call_codex(prompt):
@@ -447,13 +458,29 @@ def compare_model_summaries(model_summaries, reference_digest):
     return call_codex(comparison_prompt)
 
 
-def send_to_telegram(label, summary):
+def format_delivery_message(label, summary, metadata=None):
+    lines = [label]
+    if metadata:
+        window_start = metadata.get("window_start") or "unknown"
+        window_end = metadata.get("window_end") or "unknown"
+        message_count = metadata.get("message_count", 0)
+        group_count = metadata.get("group_count", 0)
+        lines.extend([
+            f"Window: {window_start} to {window_end}",
+            f"Messages: {message_count} across {group_count} conversations",
+        ])
+    lines.append("")
+    lines.append(summary)
+    return "\n".join(str(line) for line in lines)
+
+
+def send_to_telegram(label, summary, metadata=None):
     if not summary:
         return False
     if not SEND_TELEGRAM:
         log(f"Telegram skipped for {label}: SEND_TELEGRAM=false")
         return False
-    message = f"{label}\n\n{summary}"
+    message = format_delivery_message(label, summary, metadata)
     try:
         result = send_text(message)
     except Exception as exc:
@@ -463,7 +490,62 @@ def send_to_telegram(label, summary):
     return True
 
 
-def insert_digest(metadata, prompt, ollama_summary, codex_summary, comparison_summary, sent_any):
+def message_chunks(text, limit):
+    if limit <= 0 or len(text) <= limit:
+        return [text]
+
+    parts = []
+    remaining = text
+    while len(remaining) > limit:
+        split_at = remaining.rfind("\n\n", 0, limit)
+        if split_at < max(1, limit // 2):
+            split_at = remaining.rfind("\n", 0, limit)
+        if split_at < max(1, limit // 2):
+            split_at = limit
+        parts.append(remaining[:split_at].strip())
+        remaining = remaining[split_at:].strip()
+    if remaining:
+        parts.append(remaining)
+    return parts
+
+
+def send_to_whatsapp(label, summary, metadata=None):
+    if not summary:
+        return False
+    if not SEND_WHATSAPP:
+        log(f"WhatsApp skipped for {label}: SEND_WHATSAPP=false")
+        return False
+    if not WHATSAPP_DIGEST_JID:
+        log(f"WhatsApp send failed for {label}: WHATSAPP_DIGEST_JID is not set")
+        return False
+
+    message = format_delivery_message(label, summary, metadata)
+    parts = message_chunks(message, WHATSAPP_MAX_LEN)
+    try:
+        for index, part in enumerate(parts, start=1):
+            payload = {
+                "jid": WHATSAPP_DIGEST_JID,
+                "text": f"Part {index}/{len(parts)}\n\n{part}" if len(parts) > 1 else part,
+            }
+            response = requests.post(
+                WHATSAPP_SEND_API,
+                json=payload,
+                headers={"x-api-key": WHATSAPP_SEND_TOKEN} if WHATSAPP_SEND_TOKEN else None,
+                timeout=WHATSAPP_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+    except Exception as exc:
+        log(f"WhatsApp send failed for {label}: {exc}")
+        return False
+    log(f"WhatsApp sent for {label}: {len(parts)} message(s) to {WHATSAPP_DIGEST_JID}")
+    return True
+
+
+def send_summary(label, summary, metadata=None):
+    return send_to_telegram(label, summary, metadata), send_to_whatsapp(label, summary, metadata)
+
+
+def insert_digest(metadata, prompt, ollama_summary, codex_summary, comparison_summary, sent_to_telegram):
     conn = sqlite3.connect(DIGESTS_DB)
     cur = conn.cursor()
     cur.execute(
@@ -485,7 +567,7 @@ def insert_digest(metadata, prompt, ollama_summary, codex_summary, comparison_su
             ollama_summary,
             codex_summary,
             comparison_summary,
-            1 if sent_any else 0,
+            1 if sent_to_telegram else 0,
         ),
     )
     digest_id = cur.lastrowid
@@ -528,7 +610,9 @@ def main():
         f"Starting combined digest run (mode: {PROCESSING_MODE}, "
         f"Ollama: {', '.join(OLLAMA_MODELS)}; "
         f"Codex: {'enabled' if ENABLE_CODEX else 'disabled'}; "
-        f"comparison: {'enabled' if ENABLE_MODEL_COMPARISON else 'disabled'})"
+        f"comparison: {'enabled' if ENABLE_MODEL_COMPARISON else 'disabled'}; "
+        f"Telegram: {'enabled' if SEND_TELEGRAM else 'disabled'}; "
+        f"WhatsApp: {'enabled' if SEND_WHATSAPP else 'disabled'})"
     )
     metadata = run_digest()
     message_count = int(metadata.get("message_count", 0))
@@ -537,6 +621,20 @@ def main():
     log(f"Digest window: messages={message_count}, groups={group_count}, start={metadata.get('window_start', '')}")
     if message_count == 0:
         log("No new messages; state unchanged")
+        emit_digest_metrics(
+            log,
+            status="empty",
+            started_at=RUN_STARTED_AT,
+            now=datetime.datetime.now().timestamp(),
+            message_count=0,
+            group_count=0,
+            sent_to_telegram=0,
+            telegram_enabled=1 if SEND_TELEGRAM else 0,
+            sent_to_whatsapp=0,
+            whatsapp_enabled=1 if SEND_WHATSAPP else 0,
+            last_processed_ts=metadata.get("last_processed_ts", 0),
+            last_message_ts=metadata.get("last_message_ts", 0),
+        )
         return
 
     raw_digest = metadata.get("digest", "")
@@ -547,14 +645,17 @@ def main():
         reference_digest = digest_path.read_text(encoding="utf-8")
     prompt = build_prompt(raw_digest)
 
-    sent_any = False
+    telegram_sent_any = False
+    whatsapp_sent_any = False
     model_summaries = []
     codex_summary = ""
     if ENABLE_CODEX:
         codex_summary = call_codex(prompt)
         if codex_summary:
             model_summaries.append(("Codex", codex_summary))
-            sent_any = send_to_telegram("Codex digest", codex_summary) or sent_any
+            telegram_sent, whatsapp_sent = send_summary("Codex digest", codex_summary, metadata)
+            telegram_sent_any = telegram_sent or telegram_sent_any
+            whatsapp_sent_any = whatsapp_sent or whatsapp_sent_any
         else:
             log("Codex LLM returned no summary")
     else:
@@ -563,9 +664,10 @@ def main():
     ollama_summaries = {}
     if ENABLE_OLLAMA and not codex_summary:
         log("Codex summary unavailable; trying Ollama fallback")
-        ollama_summaries, ollama_sent_any = call_ollama_models(raw_digest)
+        ollama_summaries, ollama_telegram_sent_any, ollama_whatsapp_sent_any = call_ollama_models(raw_digest, metadata)
         model_summaries.extend((f"Ollama {model}", summary) for model, summary in ollama_summaries.items())
-        sent_any = ollama_sent_any or sent_any
+        telegram_sent_any = ollama_telegram_sent_any or telegram_sent_any
+        whatsapp_sent_any = ollama_whatsapp_sent_any or whatsapp_sent_any
     elif ENABLE_OLLAMA:
         log("Ollama fallback skipped: Codex summary succeeded")
     else:
@@ -579,7 +681,9 @@ def main():
     )
     comparison_summary = compare_model_summaries(model_summaries, reference_digest)
     if comparison_summary:
-        sent_any = send_to_telegram("Model comparison", comparison_summary) or sent_any
+        telegram_sent, whatsapp_sent = send_summary("Model comparison", comparison_summary, metadata)
+        telegram_sent_any = telegram_sent or telegram_sent_any
+        whatsapp_sent_any = whatsapp_sent or whatsapp_sent_any
 
     digest_id = insert_digest(
         metadata,
@@ -587,8 +691,12 @@ def main():
         ollama_summary,
         codex_summary,
         comparison_summary,
-        sent_any,
+        telegram_sent_any,
     )
+    delivery_enabled = SEND_TELEGRAM or SEND_WHATSAPP
+    delivery_sent_any = telegram_sent_any or whatsapp_sent_any
+    if delivery_enabled and not delivery_sent_any:
+        raise RuntimeError(f"No configured delivery succeeded for digest ID:{digest_id}; state was not advanced")
     if PROCESSING_MODE == "process" and last_message_ts > 0:
         update_state(last_message_ts)
         log(f"Updated digest_state {STATE_KEY} and legacy keys to {last_message_ts}")
@@ -596,6 +704,20 @@ def main():
         log("Preview mode: digest_state was not advanced")
     cleanup()
     log(f"Combined digest complete (ID:{digest_id}, msgs:{message_count}, groups:{group_count})")
+    emit_digest_metrics(
+        log,
+        status="success",
+        started_at=RUN_STARTED_AT,
+        now=datetime.datetime.now().timestamp(),
+        message_count=message_count,
+        group_count=group_count,
+        sent_to_telegram=1 if telegram_sent_any else 0,
+        telegram_enabled=1 if SEND_TELEGRAM else 0,
+        sent_to_whatsapp=1 if whatsapp_sent_any else 0,
+        whatsapp_enabled=1 if SEND_WHATSAPP else 0,
+        last_processed_ts=last_message_ts,
+        last_message_ts=last_message_ts,
+    )
 
 
 if __name__ == "__main__":
@@ -603,4 +725,12 @@ if __name__ == "__main__":
         main()
     except Exception as exc:
         log(f"Fatal error: {exc}")
+        emit_digest_metrics(
+            log,
+            status="failure",
+            started_at=RUN_STARTED_AT,
+            now=datetime.datetime.now().timestamp(),
+            telegram_enabled=1 if SEND_TELEGRAM else 0,
+            whatsapp_enabled=1 if SEND_WHATSAPP else 0,
+        )
         sys.exit(1)
