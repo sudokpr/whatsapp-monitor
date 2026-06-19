@@ -11,6 +11,8 @@ import urllib.request
 from collections import defaultdict
 from pathlib import Path
 
+from input_guardrails import guard_message_text
+
 # Get config from environment. Keep defaults aligned with config.sh so direct
 # invocations read the live whatsapp-group-monitor persistence file.
 repo_dir = Path(__file__).resolve().parents[2]
@@ -155,7 +157,8 @@ def link_summary(text):
     return ''
 
 def normalized_message_text(text):
-    return redact_phone_numbers((text or '').strip())
+    guarded, _ = guard_message_text(text)
+    return redact_phone_numbers(guarded)
 
 def counted_message_text(text, count):
     if count <= 1:

@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+from input_guardrails import CODEX_BASE_SECURITY_INSTRUCTIONS
+
 
 @dataclass(frozen=True)
 class CodexLlmConfig:
@@ -21,7 +23,10 @@ def build_codex_llm_config(env: dict[str, str] | None = None) -> CodexLlmConfig:
     model = env.get("CODEX_LLM_MODEL", "").strip() or None
     sandbox = env.get("CODEX_LLM_SANDBOX", "read_only").strip() or None
     ephemeral = _env_bool(env.get("CODEX_LLM_EPHEMERAL"), True)
-    base_instructions = env.get("CODEX_LLM_BASE_INSTRUCTIONS", "").strip() or None
+    custom_instructions = env.get("CODEX_LLM_BASE_INSTRUCTIONS", "").strip()
+    base_instructions = CODEX_BASE_SECURITY_INSTRUCTIONS
+    if custom_instructions:
+        base_instructions = f"{base_instructions}\n\nAdditional trusted formatting instructions:\n{custom_instructions}"
     return CodexLlmConfig(
         cwd=Path(cwd_value).expanduser() if cwd_value else None,
         model=model,
