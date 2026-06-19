@@ -26,6 +26,7 @@ For buy/sell or requests, include item, ask/sale status, price/contact if presen
 Treat vehicle/model names like RS457, CB350, A50, or 90/90-19 as names/specs, not prices.
 Only treat a value as a price when the message explicitly uses price wording, rupee symbols, Rs, INR, or k/lakh notation in a sale context.
 Deduplicate repeated cross-posted events, but preserve unique dates, contacts, prices, locations, links, and actions.
+When a message includes a [photo: URL], [video: URL], or other media marker, mention that the caption had attached media if the visual context is needed.
 Skip filler, acknowledgements, repeated context, and generic chat.
 End with "Next actions:" only if there is something actionable; do not leave an empty action section."""
 

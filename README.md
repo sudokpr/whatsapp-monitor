@@ -18,6 +18,9 @@ The API listens on port `3000` unless `PORT` is set:
 - `GET /health` returns `ok`
 - `GET /groups` returns discovered groups from the active connection
 - `GET /listings` returns the last 100 stored group messages
+- `GET /media/:groupId/:messageId` fetches stored message media on demand from
+  WhatsApp servers when the message has a persisted media descriptor. If
+  `WHATSAPP_MEDIA_TOKEN` is set, pass it as `?token=...` or `x-api-key`.
 - `GET /stats` returns daily message counts and top users/groups
 - `GET /metrics` returns Prometheus text metrics for monitor health, WhatsApp
   connection state, message capture, persistence, and API requests
@@ -74,6 +77,16 @@ uses `WHATSAPP_SEND_TOKEN`, set the same value for the digest process. Outbound
 summaries start with the digest window and message/group counts.
 Set `DIGEST_EXCLUDED_GROUP_IDS` to a comma- or space-separated list of group
 JIDs to keep delivery/control groups out of future summaries.
+Captioned image/video/document/audio messages store only WhatsApp media
+metadata, not the media bytes. Digest deliveries append clickable media links
+for those rows; clicking a link asks the running monitor to download and decrypt
+the media from WhatsApp if it is still available. Set `WHATSAPP_MEDIA_BASE_URL`
+to a URL reachable from where you read the digest, and set
+`WHATSAPP_MEDIA_TOKEN` if you want those links token-protected.
+Digest deliveries also include one time-bounded gallery link per conversation.
+The responsive gallery lazily streams photos and video ranges from WhatsApp and
+does not write media files to the Pi. Digests with more than five media items
+use gallery links instead of listing every media URL.
 `npm run digest:preview` exercises the pipeline without delivery sends or state
 advancement.
 

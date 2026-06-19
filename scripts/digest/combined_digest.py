@@ -471,6 +471,31 @@ def format_delivery_message(label, summary, metadata=None):
         ])
     lines.append("")
     lines.append(summary)
+    if metadata:
+        gallery_links = metadata.get("gallery_links") or []
+        if gallery_links:
+            lines.extend(["", "Media galleries:"])
+            for item in gallery_links:
+                group = item.get("group") or "conversation"
+                count = item.get("count") or 0
+                lines.append(f"{group}: {count} item{'s' if count != 1 else ''}")
+                lines.append(item.get("url") or "")
+                lines.append("")
+        media_links = metadata.get("media_links") or []
+        if media_links and len(media_links) <= 5:
+            lines.extend(["", "Media links:"])
+            for item in media_links[:20]:
+                group = item.get("group") or "conversation"
+                time = item.get("time") or "??"
+                media_label = item.get("label") or "media"
+                text = item.get("text") or ""
+                url = item.get("url") or ""
+                context = f" - {text}" if text else ""
+                lines.append(f"{time} {group}: {media_label}{context}".strip())
+                lines.append(url)
+                lines.append("")
+            if len(media_links) > 20:
+                lines.append(f"- ... {len(media_links) - 20} more media links omitted")
     return "\n".join(str(line) for line in lines)
 
 

@@ -1,11 +1,13 @@
 import express from "express";
 import type { WhatsappMonitor } from "./whatsapp.js";
 import { HttpMetrics, renderPrometheus } from "./metrics.js";
+import { renderGallery } from "./gallery.js";
 
 export function startServer(monitor: WhatsappMonitor, port: number): void {
   const app = express();
   const httpMetrics = new HttpMetrics();
   const sendMessageToken = process.env.WHATSAPP_SEND_TOKEN?.trim();
+  const mediaToken = process.env.WHATSAPP_MEDIA_TOKEN?.trim();
 
   app.use(express.json({ limit: "1mb" }));
 
@@ -33,6 +35,83 @@ export function startServer(monitor: WhatsappMonitor, port: number): void {
 
   app.get("/listings", (_request, response) => {
     response.json(monitor.getListings(100));
+  });
+
+  app.get("/gallery", (request, response) => {
+    if (mediaToken && request.query.token !== mediaToken) {
+      response.status(401).send("Unauthorized");
+      return;
+    }
+
+    const groupId = typeof request.query.groupId === "string" ? request.query.groupId : "";
+    const from = Number(request.query.from);
+    const to = Number(request.query.to);
+    if (!groupId || !Number.isFinite(from) || !Number.isFinite(to) || from < 0 || to < from) {
+      response.status(400).send("Invalid gallery parameters");
+      return;
+    }
+
+    const items = monitor.getMediaGallery(groupId, from, to);
+    response.type("html").send(renderGallery(items, mediaToken));
+  });
+
+  app.get("/media/:groupId/:messageId", async (request, response) => {
+    if (mediaToken) {
+      const token = request.query.token ?? request.header("x-api-key");
+      if (token !== mediaToken) {
+        response.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+    }
+
+    try {
+      const requestedRange = parseByteRange(request.header("range"));
+      if (requestedRange === "invalid") {
+        response.status(416).end();
+        return;
+      }
+
+      const media = await monitor.downloadStoredMedia(
+        request.params.groupId,
+        request.params.messageId,
+        requestedRange
+          ? { startByte: requestedRange.start, endByte: requestedRange.end === undefined ? undefined : requestedRange.end + 1 }
+          : undefined,
+      );
+      if (!media) {
+        response.status(404).json({ error: "Media not found" });
+        return;
+      }
+
+      if (requestedRange && media.fileLength !== undefined) {
+        const end = Math.min(requestedRange.end ?? media.fileLength - 1, media.fileLength - 1);
+        if (requestedRange.start >= media.fileLength || end < requestedRange.start) {
+          response.setHeader("Content-Range", `bytes */${media.fileLength}`);
+          response.status(416).end();
+          return;
+        }
+        response.status(206);
+        response.setHeader("Content-Range", `bytes ${requestedRange.start}-${end}/${media.fileLength}`);
+        response.setHeader("Content-Length", end - requestedRange.start + 1);
+      } else if (media.fileLength !== undefined) {
+        response.setHeader("Content-Length", media.fileLength);
+      }
+
+      response.setHeader("Content-Type", media.mimeType);
+      response.setHeader("Content-Disposition", `inline; filename="${safeHeaderFilename(media.fileName)}"`);
+      response.setHeader("Accept-Ranges", media.fileLength !== undefined ? "bytes" : "none");
+      media.stream.on("error", (error) => {
+        console.warn("Media download stream failed:", error);
+        if (!response.headersSent) {
+          response.status(502).json({ error: "Media download failed" });
+        } else {
+          response.end();
+        }
+      });
+      media.stream.pipe(response);
+    } catch (error: any) {
+      response.status(502).json({ error: error.message });
+    }
   });
 
   app.get("/stats", (_request, response) => {
@@ -93,4 +172,21 @@ export function startServer(monitor: WhatsappMonitor, port: number): void {
   app.listen(port, () => {
     console.log(`HTTP API listening on http://localhost:${port}`);
   });
+}
+
+function safeHeaderFilename(fileName: string): string {
+  return fileName.replace(/[\\"]/g, "_").replace(/[\r\n]/g, "");
+}
+
+function parseByteRange(value: string | undefined): { start: number; end?: number } | "invalid" | null {
+  if (!value) return null;
+  const match = /^bytes=(\d+)-(\d*)$/.exec(value.trim());
+  if (!match) return "invalid";
+
+  const start = Number(match[1]);
+  const end = match[2] ? Number(match[2]) : undefined;
+  if (!Number.isSafeInteger(start) || (end !== undefined && (!Number.isSafeInteger(end) || end < start))) {
+    return "invalid";
+  }
+  return { start, end };
 }

@@ -7,6 +7,7 @@ import sys
 import os
 import sqlite3
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import defaultdict
 from pathlib import Path
@@ -26,6 +27,8 @@ newsletter_messages_per_group = int(os.environ.get('NEWSLETTER_MESSAGES_PER_GROU
 digest_message_char_limit = int(os.environ.get('DIGEST_MESSAGE_CHAR_LIMIT', 0))
 context_message_char_limit = int(os.environ.get('CONTEXT_MESSAGE_CHAR_LIMIT', 0))
 participants_api = os.environ.get('PARTICIPANTS_API') or 'http://localhost:3000/participants'
+media_link_base_url = (os.environ.get('WHATSAPP_MEDIA_BASE_URL') or 'http://localhost:3000').rstrip('/')
+media_link_token = os.environ.get('WHATSAPP_MEDIA_TOKEN') or ''
 state_key = os.environ.get('DIGEST_STATE_KEY', 'last_processed_ts')  # Allow per-LLM state keys
 excluded_group_ids = {
     group_id.strip()
@@ -171,6 +174,40 @@ def counted_message_text(text, count):
         return f'Shared {count} map/location links'
     return text
 
+def media_link(message):
+    media = message.get('media')
+    if not isinstance(media, dict) or not media.get('mediaKey'):
+        return ''
+
+    group_id = urllib.parse.quote(str(message.get('groupId') or ''), safe='')
+    message_id = urllib.parse.quote(str(message.get('id') or ''), safe='')
+    if not group_id or not message_id:
+        return ''
+
+    url = f'{media_link_base_url}/media/{group_id}/{message_id}'
+    if media_link_token:
+        url = f'{url}?{urllib.parse.urlencode({"token": media_link_token})}'
+    return url
+
+def gallery_link(group_id, from_ts, to_ts):
+    params = {
+        'groupId': group_id,
+        'from': from_ts,
+        'to': to_ts,
+    }
+    if media_link_token:
+        params['token'] = media_link_token
+    return f'{media_link_base_url}/gallery?{urllib.parse.urlencode(params)}'
+
+def media_label(message):
+    media = message.get('media')
+    if not isinstance(media, dict):
+        return 'media'
+    media_type = str(media.get('type') or 'media')
+    if media_type == 'image':
+        return 'photo'
+    return media_type
+
 def limit_text(text, limit):
     if limit <= 0 or len(text) <= limit:
         return text
@@ -248,6 +285,8 @@ if label_counts.get('DM:contact', 0) > 1:
 lines = []
 lines.append(f"📱 WHATSAPP DIGEST — since last run")
 lines.append(f"Showing msgs from {datetime.datetime.fromtimestamp(effective_start_ts/1000, ist_tz).strftime('%H:%M')} to {now.strftime('%H:%M')} IST | {len(recent_msgs)} msgs | {len(by_group)} groups\n")
+media_links = []
+gallery_links = []
 
 for grp in ordered_groups:
     msgs = by_group[grp]
@@ -297,11 +336,47 @@ for grp in ordered_groups:
         if display_entries and display_entries[-1]['text'] == text and text.startswith('Shared '):
             display_entries[-1]['count'] += 1
             continue
-        display_entries.append({'time': time, 'sender': sender, 'text': text, 'count': 1})
+        display_entries.append({'time': time, 'sender': sender, 'text': text, 'count': 1, 'message': m})
 
     for entry in display_entries:
         text = limit_text(counted_message_text(entry['text'], entry['count']), digest_message_char_limit)
+        link = media_link(entry.get('message', {}))
+        if link:
+            label = media_label(entry.get('message', {}))
+            text = f"{text} [{label}: {link}]"
         lines.append(f"   [{entry['time']}] {entry['sender']}: {text}")
+
+    for m in conversations:
+        link = media_link(m)
+        if not link:
+            continue
+        label = media_label(m)
+        text = limit_text(normalized_message_text(m.get('text', '')), 120)
+        media_links.append({
+            'group': group_label,
+            'time': ts_to_time(message_timestamp(m)),
+            'sender': sender_label(m.get('sender', '')),
+            'label': label,
+            'text': text,
+            'url': link,
+        })
+
+    gallery_media = [
+        m for m in conversations
+        if isinstance(m.get('media'), dict)
+        and m['media'].get('type') in ('image', 'video', 'sticker')
+        and media_link(m)
+    ]
+    if gallery_media:
+        gallery_links.append({
+            'group': group_label,
+            'count': len(gallery_media),
+            'url': gallery_link(
+                gallery_media[0].get('groupId') or '',
+                effective_start_ts,
+                max(message_timestamp(m) for m in gallery_media),
+            ),
+        })
     
     links = []
     for m in msgs:
@@ -338,6 +413,8 @@ digest_metadata = {
     'context_window_hours': context_window_hours,
     'digest_message_char_limit': digest_message_char_limit,
     'context_message_char_limit': context_message_char_limit,
+    'media_links': media_links,
+    'gallery_links': gallery_links,
     'digest': output
 }
 
