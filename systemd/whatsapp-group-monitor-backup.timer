@@ -1,0 +1,10 @@
+[Unit]
+Description=Run WhatsApp group monitor backup daily
+
+[Timer]
+OnCalendar=*-*-* 03:45:00 Asia/Kolkata
+Persistent=true
+Unit=whatsapp-group-monitor-backup.service
+
+[Install]
+WantedBy=timers.target
