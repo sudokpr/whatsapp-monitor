@@ -33,25 +33,27 @@ export function renderGallery(items: MediaGalleryItem[], mediaToken: string | un
     .meta { position:absolute; left:0; right:0; bottom:0; display:flex; justify-content:space-between; align-items:end; gap:8px; padding:8px 9px; color:#fff; background:rgba(0,0,0,.72); font-size:12px; }
     .kind { padding:3px 6px; border-radius:4px; background:var(--accent); font-weight:700; text-transform:uppercase; }
     .kind.video { background:var(--video); }
+    .document-preview { width:100%; height:100%; display:grid; place-items:center; background:#e9eeeb; color:#34413a; font-size:clamp(16px,4vw,28px); font-weight:800; }
     .empty { color:var(--muted); padding:48px 0; text-align:center; }
     dialog { width:100vw; height:100dvh; max-width:none; max-height:none; margin:0; padding:0; border:0; background:#0c0e0d; color:#fff; }
     dialog::backdrop { background:#0c0e0d; }
     .viewer { height:100%; display:grid; grid-template-rows:auto minmax(0,1fr) auto; }
     .viewer-bar { display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:56px; padding:8px 14px; border-bottom:1px solid #303532; }
+    .viewer-actions { display:flex; gap:8px; }
     .viewer-title { min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:14px; }
-    .close { border:1px solid #59615d; background:#202522; color:#fff; border-radius:6px; min-height:38px; padding:0 14px; font:inherit; cursor:pointer; }
+    .close, .nav { border:1px solid #59615d; background:#202522; color:#fff; border-radius:6px; min-height:38px; padding:0 14px; font:inherit; cursor:pointer; }
+    .nav:disabled { opacity:.38; cursor:default; }
     .stage { min-height:0; display:grid; place-items:center; overflow:hidden; }
-    .stage img, .stage video { display:block; max-width:100%; max-height:100%; object-fit:contain; }
-    .stage video { width:100%; height:100%; }
+    .stage img, .stage video, .stage iframe { display:block; width:100%; height:100%; min-width:0; min-height:0; border:0; object-fit:contain; }
     .caption { max-height:24vh; overflow:auto; margin:0; padding:12px 16px calc(12px + env(safe-area-inset-bottom)); color:#d8ddda; border-top:1px solid #303532; font-size:14px; white-space:pre-wrap; }
     @media (max-width:640px) { .header-inner { align-items:stretch; flex-direction:column; } .filters { width:100%; } .filters button { flex:1; padding:0 8px; } .grid { grid-template-columns:repeat(3,minmax(0,1fr)); gap:3px; } .tile { border-radius:2px; } .meta { padding:22px 5px 5px; } .meta time { display:none; } }
     @media (prefers-color-scheme:dark) { :root { color-scheme:dark; --bg:#121614; --panel:#1b211e; --ink:#eef2ef; --muted:#a5aea9; --line:#39413d; } header { background:rgba(18,22,20,.96); } .tile { background:#252c28; } }
   </style>
 </head>
 <body>
-  <header><div class="header-inner"><div><h1>${escapeHtml(groupName)}</h1><p class="count" id="count"></p></div><div class="filters" aria-label="Media type"><button data-filter="all" aria-pressed="true">All</button><button data-filter="image" aria-pressed="false">Photos</button><button data-filter="video" aria-pressed="false">Videos</button></div></div></header>
+  <header><div class="header-inner"><div><h1>${escapeHtml(groupName)}</h1><p class="count" id="count"></p></div><div class="filters" aria-label="Media type"><button data-filter="all" aria-pressed="true">All</button><button data-filter="image" aria-pressed="false">Photos</button><button data-filter="video" aria-pressed="false">Videos</button><button data-filter="document" aria-pressed="false">PDFs</button></div></div></header>
   <main><div class="grid" id="grid"></div><p class="empty" id="empty" hidden>No media in this view.</p></main>
-  <dialog id="viewer"><div class="viewer"><div class="viewer-bar"><div class="viewer-title" id="viewer-title"></div><button class="close" id="close" type="button">Close</button></div><div class="stage" id="stage"></div><p class="caption" id="caption"></p></div></dialog>
+  <dialog id="viewer"><div class="viewer"><div class="viewer-bar"><div class="viewer-title" id="viewer-title"></div><div class="viewer-actions"><button class="nav" id="prev" type="button" aria-label="Previous media">Prev</button><button class="nav" id="next" type="button" aria-label="Next media">Next</button><button class="close" id="close" type="button">Close</button></div></div><div class="stage" id="stage"></div><p class="caption" id="caption"></p></div></dialog>
   <script type="application/json" id="gallery-data">${payload}</script>
   <script>
     const data = JSON.parse(document.getElementById('gallery-data').textContent);
@@ -62,6 +64,10 @@ export function renderGallery(items: MediaGalleryItem[], mediaToken: string | un
     const stage = document.getElementById('stage');
     const caption = document.getElementById('caption');
     const viewerTitle = document.getElementById('viewer-title');
+    const prev = document.getElementById('prev');
+    const next = document.getElementById('next');
+    let visibleItems = [];
+    let currentIndex = -1;
     const tokenSuffix = data.mediaToken ? '?token=' + encodeURIComponent(data.mediaToken) : '';
     const mediaUrl = item => '/media/' + encodeURIComponent(item.groupId) + '/' + encodeURIComponent(item.id) + tokenSuffix;
     const visualType = item => item.type === 'image' || item.type === 'sticker' ? 'image' : item.type;
@@ -81,37 +87,48 @@ export function renderGallery(items: MediaGalleryItem[], mediaToken: string | un
       observer.unobserve(entry.target);
     }), { rootMargin:'240px' });
 
-    function openItem(item) {
+    function showItem(index) {
+      if (index < 0 || index >= visibleItems.length) return;
+      currentIndex = index;
+      const item = visibleItems[index];
       stage.replaceChildren();
       const kind = visualType(item);
-      const media = document.createElement(kind === 'video' ? 'video' : 'img');
+      const media = document.createElement(kind === 'video' ? 'video' : kind === 'document' ? 'iframe' : 'img');
       media.src = mediaUrl(item);
       if (kind === 'video') { media.controls = true; media.autoplay = true; media.playsInline = true; }
-      media.alt = item.text || kind;
+      if (kind === 'document') media.title = item.fileName || item.text || 'PDF document';
+      else media.alt = item.text || kind;
       stage.append(media);
-      viewerTitle.textContent = formatTime(item.timestamp);
+      viewerTitle.textContent = (item.fileName ? item.fileName + ' - ' : '') + formatTime(item.timestamp) + ' (' + (index + 1) + '/' + visibleItems.length + ')';
       caption.textContent = item.text || '';
-      viewer.showModal();
+      prev.disabled = index === 0;
+      next.disabled = index === visibleItems.length - 1;
+    }
+
+    function openItem(index) {
+      showItem(index);
+      if (!viewer.open) viewer.showModal();
     }
 
     function render(filter) {
       grid.replaceChildren();
-      const items = data.items.filter(item => filter === 'all' || visualType(item) === filter);
-      count.textContent = items.length + (items.length === 1 ? ' item' : ' items') + ' - streamed on demand';
-      empty.hidden = items.length !== 0;
-      for (const item of items) {
+      visibleItems = data.items.filter(item => filter === 'all' || visualType(item) === filter);
+      count.textContent = visibleItems.length + (visibleItems.length === 1 ? ' item' : ' items') + ' - streamed on demand';
+      empty.hidden = visibleItems.length !== 0;
+      visibleItems.forEach((item, index) => {
         const kind = visualType(item);
         const tile = document.createElement('button');
         tile.className = 'tile'; tile.type = 'button'; tile.setAttribute('aria-label', 'Open ' + kind + ' from ' + formatTime(item.timestamp));
-        const media = document.createElement(kind === 'video' ? 'video' : 'img');
-        media.dataset.src = mediaUrl(item); media.alt = item.text || kind;
+        const media = kind === 'document' ? document.createElement('span') : document.createElement(kind === 'video' ? 'video' : 'img');
+        if (kind === 'document') { media.className = 'document-preview'; media.textContent = 'PDF'; }
+        else { media.dataset.src = mediaUrl(item); media.alt = item.text || kind; }
         if (kind === 'video') { media.muted = true; media.playsInline = true; media.preload = 'metadata'; }
         const meta = document.createElement('span'); meta.className = 'meta';
         const badge = document.createElement('span'); badge.className = 'kind ' + kind; badge.textContent = kind;
         const time = document.createElement('time'); time.textContent = formatTime(item.timestamp);
-        meta.append(badge, time); tile.append(media, meta); tile.addEventListener('click', () => openItem(item));
-        grid.append(tile); observer.observe(tile);
-      }
+        meta.append(badge, time); tile.append(media, meta); tile.addEventListener('click', () => openItem(index));
+        grid.append(tile); if (kind !== 'document') observer.observe(tile);
+      });
     }
 
     document.querySelectorAll('[data-filter]').forEach(button => button.addEventListener('click', () => {
@@ -119,6 +136,13 @@ export function renderGallery(items: MediaGalleryItem[], mediaToken: string | un
       render(button.dataset.filter);
     }));
     document.getElementById('close').addEventListener('click', () => viewer.close());
+    prev.addEventListener('click', () => showItem(currentIndex - 1));
+    next.addEventListener('click', () => showItem(currentIndex + 1));
+    document.addEventListener('keydown', event => {
+      if (!viewer.open) return;
+      if (event.key === 'ArrowLeft') { event.preventDefault(); showItem(currentIndex - 1); }
+      if (event.key === 'ArrowRight') { event.preventDefault(); showItem(currentIndex + 1); }
+    });
     viewer.addEventListener('close', () => { stage.querySelector('video')?.pause(); stage.replaceChildren(); });
     render('all');
   </script>

@@ -8,6 +8,7 @@ DIGEST_DIR = Path(__file__).resolve().parents[1] / "scripts" / "digest"
 sys.path.insert(0, str(DIGEST_DIR))
 
 from codex_llm import build_codex_llm_config
+from combined_digest import format_delivery_message
 from input_guardrails import OMITTED_MESSAGE, guard_message_text
 from prompt_builder import build_prompt
 
@@ -51,6 +52,72 @@ class DigestGuardrailTests(unittest.TestCase):
         })
         self.assertIn("Never use tools", cfg.base_instructions)
         self.assertIn("Use terse headings.", cfg.base_instructions)
+
+    def test_delivery_omits_individual_media_links_when_gallery_exists(self):
+        message = format_delivery_message("Digest", "Summary", {
+            "gallery_links": [{
+                "group": "Family",
+                "count": 1,
+                "url": "https://example.test/gallery",
+            }],
+            "media_links": [{
+                "group": "Family",
+                "time": "10:30",
+                "label": "photo",
+                "url": "https://example.test/media/1",
+            }],
+        })
+
+        self.assertIn("Media galleries:", message)
+        self.assertIn("https://example.test/gallery", message)
+        self.assertNotIn("Media links:", message)
+        self.assertNotIn("https://example.test/media/1", message)
+
+    def test_delivery_uses_individual_media_links_without_gallery(self):
+        message = format_delivery_message("Digest", "Summary", {
+            "media_links": [{
+                "group": "Family",
+                "time": "10:30",
+                "label": "photo",
+                "url": "https://example.test/media/1",
+            }],
+        })
+
+        self.assertIn("Media links:", message)
+        self.assertIn("https://example.test/media/1", message)
+
+    def test_delivery_appends_message_links_with_context(self):
+        message = format_delivery_message("Digest", "Summary", {
+            "message_links": [{
+                "group": "Runners",
+                "time": "07:45",
+                "sender": "participant-2",
+                "context": "Register for the Sunday long run",
+                "url": "https://example.test/register",
+            }],
+        })
+
+        self.assertIn("Message links:", message)
+        self.assertIn("07:45 Runners (participant-2): Register for the Sunday long run", message)
+        self.assertIn("https://example.test/register", message)
+
+    def test_delivery_caps_message_links(self):
+        message = format_delivery_message("Digest", "Summary", {
+            "message_links": [
+                {
+                    "group": "Group",
+                    "time": "07:45",
+                    "sender": "participant-1",
+                    "context": f"Context {index}",
+                    "url": f"https://example.test/{index}",
+                }
+                for index in range(21)
+            ],
+        })
+
+        self.assertIn("https://example.test/19", message)
+        self.assertNotIn("https://example.test/20", message)
+        self.assertIn("- ... 1 more message links omitted", message)
 
 
 if __name__ == "__main__":

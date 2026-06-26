@@ -33,7 +33,7 @@ End with "Next actions:" only if there is something actionable; do not leave an 
 
 def _static_main_prompt(raw_digest: str) -> str:
     return f"""You are summarising WhatsApp community conversations into a plain-text digest.
-The raw digest below contains only new messages since the last successful digest run, grouped by conversation name, with timestamps, anonymised sender labels, and text. Auto-Strava noise is mostly filtered.
+The raw digest below contains only new messages since the last successful digest run, grouped by conversation name, with timestamps, WhatsApp profile names when available, fallback sender labels, and text. Auto-Strava noise is mostly filtered.
 Some active groups may include a clearly marked previous-window context section. Use that context only to understand replies and references; do not report it as new activity unless it is directly needed to explain a new message.
 Write a detailed but readable plain-text digest for someone who was offline.
 

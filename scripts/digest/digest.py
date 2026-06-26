@@ -144,7 +144,10 @@ def ts_to_time(ts):
         return '??'
 
 def extract_urls(text):
-    return re.findall(r'https?://[^\s<>"\'\)]+', text)
+    return [
+        url.rstrip('.,;:!?')
+        for url in re.findall(r'https?://[^\s<>"\'\)]+', text or '')
+    ]
 
 def link_summary(text):
     urls = extract_urls(text)
@@ -206,12 +209,22 @@ def media_label(message):
     media_type = str(media.get('type') or 'media')
     if media_type == 'image':
         return 'photo'
+    if media_type == 'document' and str(media.get('mimeType') or '').lower() == 'application/pdf':
+        return 'PDF'
     return media_type
 
 def limit_text(text, limit):
     if limit <= 0 or len(text) <= limit:
         return text
     return f"{text[:limit].rstrip()} ... [truncated {len(text) - limit} chars]"
+
+def link_context_text(text, url):
+    context = normalized_message_text(text)
+    if url:
+        context = context.replace(url, ' ')
+    context = re.sub(r'https?://[^\s<>"\'\)]+', ' ', context)
+    context = re.sub(r'\s+', ' ', context).strip(' -:.,')
+    return context or link_summary(text) or 'Link shared'
 
 def redact_phone_numbers(text):
     """Remove phone-like identifiers before text is sent to any LLM."""
@@ -243,6 +256,25 @@ def redact_conversation_name(name):
     redacted = re.sub(r'DM:\s*(?:contact|\[phone\](?:@\w+)?)', 'DM:contact', redacted)
     return redacted
 
+def profile_name_label(message):
+    name = str(message.get('senderName') or '').strip()
+    if not name:
+        return ''
+    name = re.sub(r'\s+', ' ', name)
+    redacted = redact_phone_numbers(name)
+    if redacted in ('', 'contact', '[phone]') or redacted.startswith('@contact'):
+        return ''
+    return redacted
+
+def conversation_label(group_name, messages):
+    label = redact_conversation_name(group_name)
+    if label.startswith('DM:contact'):
+        for message in messages:
+            name = profile_name_label(message)
+            if name:
+                return f'DM:{name}'
+    return label
+
 def is_newsletter_group(group_name):
     name = (group_name or '').lower()
     return 'newsletter' in name or 'bulletin' in name
@@ -272,7 +304,7 @@ ordered_groups = [grp for grp, _ in sorted(by_group.items(), key=lambda x: -len(
 label_counts = defaultdict(int)
 group_labels = {}
 for grp in ordered_groups:
-    label = redact_conversation_name(grp)
+    label = conversation_label(grp, by_group[grp])
     label_counts[label] += 1
     if label_counts[label] > 1 and label.startswith('DM:contact'):
         label = f"{label}-{label_counts[label]}"
@@ -287,6 +319,8 @@ lines.append(f"📱 WHATSAPP DIGEST — since last run")
 lines.append(f"Showing msgs from {datetime.datetime.fromtimestamp(effective_start_ts/1000, ist_tz).strftime('%H:%M')} to {now.strftime('%H:%M')} IST | {len(recent_msgs)} msgs | {len(by_group)} groups\n")
 media_links = []
 gallery_links = []
+message_links = []
+seen_message_links = set()
 
 for grp in ordered_groups:
     msgs = by_group[grp]
@@ -295,7 +329,11 @@ for grp in ordered_groups:
     group_label = group_labels[grp]
     sender_labels = {}
 
-    def sender_label(sender):
+    def sender_label(message):
+        name = profile_name_label(message)
+        if name:
+            return name
+        sender = message.get('sender', '')
         if sender not in sender_labels:
             sender_labels[sender] = f"participant-{len(sender_labels) + 1}"
         return sender_labels[sender]
@@ -315,7 +353,7 @@ for grp in ordered_groups:
             text = normalized_message_text(m.get('text', ''))
             if not text:
                 continue
-            sender = sender_label(m.get('sender', ''))
+            sender = sender_label(m)
             time = ts_to_time(message_timestamp(m))
             lines.append(f"   [{time}] {sender}: {limit_text(text, context_message_char_limit)}")
         lines.append("   News updates:" if newsletter_group else "   New messages:")
@@ -330,7 +368,7 @@ for grp in ordered_groups:
     message_limit = newsletter_messages_per_group if newsletter_group else regular_messages_per_group
     display_entries = []
     for m in limited_messages(conversations, message_limit):
-        sender = sender_label(m.get('sender', ''))
+        sender = sender_label(m)
         time = ts_to_time(m['timestamp'])
         text = normalized_message_text(m.get('text', ''))
         if display_entries and display_entries[-1]['text'] == text and text.startswith('Shared '):
@@ -355,16 +393,35 @@ for grp in ordered_groups:
         media_links.append({
             'group': group_label,
             'time': ts_to_time(message_timestamp(m)),
-            'sender': sender_label(m.get('sender', '')),
+            'sender': sender_label(m),
             'label': label,
             'text': text,
             'url': link,
         })
 
+    for m in conversations:
+        for url in extract_urls(m.get('text', '')):
+            if url in seen_message_links:
+                continue
+            seen_message_links.add(url)
+            message_links.append({
+                'group': group_label,
+                'time': ts_to_time(message_timestamp(m)),
+                'sender': sender_label(m),
+                'context': limit_text(link_context_text(m.get('text', ''), url), 160),
+                'url': url,
+            })
+
     gallery_media = [
         m for m in conversations
         if isinstance(m.get('media'), dict)
-        and m['media'].get('type') in ('image', 'video', 'sticker')
+        and (
+            m['media'].get('type') in ('image', 'video', 'sticker')
+            or (
+                m['media'].get('type') == 'document'
+                and str(m['media'].get('mimeType') or '').lower() == 'application/pdf'
+            )
+        )
         and media_link(m)
     ]
     if gallery_media:
@@ -415,6 +472,7 @@ digest_metadata = {
     'context_message_char_limit': context_message_char_limit,
     'media_links': media_links,
     'gallery_links': gallery_links,
+    'message_links': message_links,
     'digest': output
 }
 

@@ -78,15 +78,14 @@ summaries start with the digest window and message/group counts.
 Set `DIGEST_EXCLUDED_GROUP_IDS` to a comma- or space-separated list of group
 JIDs to keep delivery/control groups out of future summaries.
 Captioned image/video/document/audio messages store only WhatsApp media
-metadata, not the media bytes. Digest deliveries append clickable media links
-for those rows; clicking a link asks the running monitor to download and decrypt
-the media from WhatsApp if it is still available. Set `WHATSAPP_MEDIA_BASE_URL`
-to a URL reachable from where you read the digest, and set
-`WHATSAPP_MEDIA_TOKEN` if you want those links token-protected.
-Digest deliveries also include one time-bounded gallery link per conversation.
+metadata, not the media bytes. Digest deliveries include one time-bounded
+gallery link per conversation; when no gallery is available, a small digest can
+instead include individual media links. Opening either asks the running monitor
+to download and decrypt the media from WhatsApp if it is still available. Set
+`WHATSAPP_MEDIA_BASE_URL` to a URL reachable from where you read the digest, and
+set `WHATSAPP_MEDIA_TOKEN` if you want those links token-protected.
 The responsive gallery lazily streams photos and video ranges from WhatsApp and
-does not write media files to the Pi. Digests with more than five media items
-use gallery links instead of listing every media URL.
+does not write media files to the Pi.
 `npm run digest:preview` exercises the pipeline without delivery sends or state
 advancement.
 

@@ -33,6 +33,7 @@ export interface StoredMessage {
   text: string;
   timestamp: number;
   sender: string;
+  senderName?: string;
   groupId: string;
   groupName: string;
   media?: StoredMedia;
@@ -68,6 +69,7 @@ export interface MediaGalleryItem {
   text: string;
   type: StoredMedia["type"];
   mimeType: string;
+  fileName?: string;
 }
 
 export class WhatsappMonitor {
@@ -186,7 +188,7 @@ export class WhatsappMonitor {
         || message.timestamp < from
         || message.timestamp > to
         || !message.media
-        || !["image", "video", "sticker"].includes(message.media.type)
+        || !isGalleryMedia(message.media)
       ) {
         continue;
       }
@@ -198,6 +200,7 @@ export class WhatsappMonitor {
         text: message.text,
         type: message.media.type,
         mimeType: message.media.mimeType || defaultMimeType(message.media.type),
+        fileName: message.media.fileName,
       });
     }
     return [...items.values()].sort((left, right) => left.timestamp - right.timestamp);
@@ -440,7 +443,8 @@ export class WhatsappMonitor {
 
   private async handleMessage(message: WAMessage, upsertType?: string): Promise<void> {
     const remote = message.key.remoteJid;
-    const text = extractText(message);
+    const media = extractMedia(message);
+    const text = extractText(message) ?? mediaPlaceholder(media);
 
     // ignore messages without content or id
     if (!remote || !message.key.id) {
@@ -474,9 +478,10 @@ export class WhatsappMonitor {
       return;
     }
 
+    const senderName = extractSenderName(message);
     const groupName = isGroup
       ? await this.getGroupName(remote)
-      : `DM:${message.key.participant ?? remote}`;
+      : `DM:${senderName ?? message.key.participant ?? remote}`;
 
     const timestamp = timestampToMs(message.messageTimestamp);
     const storedMessage: StoredMessage = {
@@ -484,9 +489,10 @@ export class WhatsappMonitor {
       text,
       timestamp,
       sender: message.key.participant ?? (isGroup ? 'unknown' : remote),
+      senderName,
       groupId: remote,
       groupName,
-      media: extractMedia(message),
+      media,
     };
 
     console.log(`Incoming ${isGroup ? 'group' : 'DM'} message [${groupName}]: ${text}`);
@@ -658,6 +664,20 @@ function defaultMimeType(type: StoredMedia["type"]): string {
   }
 }
 
+function isGalleryMedia(media: StoredMedia): boolean {
+  return ["image", "video", "sticker"].includes(media.type)
+    || (media.type === "document" && media.mimeType?.toLowerCase() === "application/pdf");
+}
+
+function mediaPlaceholder(media: StoredMedia | undefined): string | undefined {
+  if (!media) return undefined;
+  if (media.type === "image") return "Shared a photo";
+  if (media.type === "video") return "Shared a video";
+  if (media.type === "sticker") return "Shared a sticker";
+  if (media.type === "audio") return "Shared an audio message";
+  return media.fileName ? `Shared document: ${media.fileName}` : "Shared a document";
+}
+
 function defaultExtension(type: StoredMedia["type"], mimeType: string | undefined): string {
   const lowerMime = mimeType?.toLowerCase();
   if (lowerMime?.includes("png")) return "png";
@@ -706,6 +726,19 @@ function ignoredMessageDetails(message: WAMessage, contentType: string, upsertTy
   };
 
   return JSON.stringify(summary);
+}
+
+function extractSenderName(message: WAMessage): string | undefined {
+  const envelope = message as AnyRecord;
+  const name = textValue(envelope.pushName)?.trim();
+  if (!name || looksLikeWhatsAppJid(name)) {
+    return undefined;
+  }
+  return name;
+}
+
+function looksLikeWhatsAppJid(value: string): boolean {
+  return /@(?:s\.whatsapp\.net|lid|g\.us|newsletter)\b/.test(value);
 }
 
 function extractTemplateText(content: AnyRecord | undefined): string | undefined {
