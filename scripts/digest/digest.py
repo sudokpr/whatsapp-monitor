@@ -275,6 +275,23 @@ def conversation_label(group_name, messages):
                 return f'DM:{name}'
     return label
 
+def reply_context_text(message):
+    reply = message.get('replyTo')
+    if not isinstance(reply, dict) or not reply.get('id'):
+        return ''
+
+    text = normalized_message_text(reply.get('text') or '')
+    if text:
+        return f'reply to previous message: "{limit_text(text, 120)}"'
+    return 'reply to previous message'
+
+def digest_line_text(message):
+    text = normalized_message_text(message.get('text', ''))
+    reply_context = reply_context_text(message)
+    if not reply_context:
+        return text
+    return f'{reply_context} -> {text}' if text else reply_context
+
 def is_newsletter_group(group_name):
     name = (group_name or '').lower()
     return 'newsletter' in name or 'bulletin' in name
@@ -350,7 +367,7 @@ for grp in ordered_groups:
         context_end = datetime.datetime.fromtimestamp(effective_start_ts/1000, ist_tz).strftime('%H:%M')
         lines.append(f"   Context from previous window ({context_start}-{context_end}, not new):")
         for m in context_for_group:
-            text = normalized_message_text(m.get('text', ''))
+            text = digest_line_text(m)
             if not text:
                 continue
             sender = sender_label(m)
@@ -370,7 +387,7 @@ for grp in ordered_groups:
     for m in limited_messages(conversations, message_limit):
         sender = sender_label(m)
         time = ts_to_time(m['timestamp'])
-        text = normalized_message_text(m.get('text', ''))
+        text = digest_line_text(m)
         if display_entries and display_entries[-1]['text'] == text and text.startswith('Shared '):
             display_entries[-1]['count'] += 1
             continue

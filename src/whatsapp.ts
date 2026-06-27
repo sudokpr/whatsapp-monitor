@@ -37,6 +37,13 @@ export interface StoredMessage {
   groupId: string;
   groupName: string;
   media?: StoredMedia;
+  replyTo?: StoredReply;
+}
+
+export interface StoredReply {
+  id: string;
+  sender?: string;
+  text?: string;
 }
 
 export interface StoredMedia {
@@ -493,6 +500,7 @@ export class WhatsappMonitor {
       groupId: remote,
       groupName,
       media,
+      replyTo: extractReplyTo(message),
     };
 
     console.log(`Incoming ${isGroup ? 'group' : 'DM'} message [${groupName}]: ${text}`);
@@ -626,6 +634,36 @@ function extractMedia(message: WAMessage): StoredMedia | undefined {
   }
 
   return undefined;
+}
+
+function extractReplyTo(message: WAMessage): StoredReply | undefined {
+  const content = normalizeMessageContent(message.message);
+  const contextInfo = firstRecord(
+    content?.extendedTextMessage?.contextInfo,
+    content?.imageMessage?.contextInfo,
+    content?.videoMessage?.contextInfo,
+    content?.documentMessage?.contextInfo,
+    content?.documentWithCaptionMessage?.message?.documentMessage?.contextInfo,
+    content?.buttonsResponseMessage?.contextInfo,
+    content?.listResponseMessage?.contextInfo,
+    content?.templateButtonReplyMessage?.contextInfo,
+    content?.interactiveResponseMessage?.contextInfo,
+  );
+  const quotedId = textValue(contextInfo?.stanzaId);
+  if (!quotedId) {
+    return undefined;
+  }
+
+  const quotedMessage = asRecord(contextInfo?.quotedMessage);
+  const quotedText = quotedMessage
+    ? extractText({ message: quotedMessage } as WAMessage)
+    : undefined;
+
+  return {
+    id: quotedId,
+    sender: textValue(contextInfo?.participant),
+    text: quotedText,
+  };
 }
 
 function bytesToBase64(value: unknown): string | undefined {
