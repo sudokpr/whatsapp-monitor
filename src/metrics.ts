@@ -6,6 +6,7 @@ export interface MetricSample {
   type: "counter" | "gauge" | "histogram";
   value: number;
   labels?: MetricLabels;
+  familyName?: string;
 }
 
 export class HttpMetrics {
@@ -56,15 +57,18 @@ export class HttpMetrics {
 export function renderPrometheus(samples: MetricSample[]): string {
   const metadata = new Map<string, Pick<MetricSample, "help" | "type">>();
   for (const sample of samples) {
-    metadata.set(sample.name, { help: sample.help, type: sample.type });
+    const familyName = sample.familyName ?? sample.name;
+    if (!metadata.has(familyName)) {
+      metadata.set(familyName, { help: sample.help, type: sample.type });
+    }
   }
 
   const lines: string[] = [];
   for (const [name, meta] of metadata) {
     lines.push(`# HELP ${name} ${escapeHelp(meta.help)}`);
     lines.push(`# TYPE ${name} ${meta.type}`);
-    for (const sample of samples.filter((item) => item.name === name)) {
-      lines.push(`${name}${formatLabels(sample.labels)} ${formatNumber(sample.value)}`);
+    for (const sample of samples.filter((item) => (item.familyName ?? item.name) === name)) {
+      lines.push(`${sample.name}${formatLabels(sample.labels)} ${formatNumber(sample.value)}`);
     }
   }
   lines.push("");

@@ -166,6 +166,16 @@ def normalized_message_text(text):
     guarded, _ = guard_message_text(text)
     return redact_phone_numbers(guarded)
 
+def message_has_suspected_prompt_injection(message):
+    _, flagged = guard_message_text(message.get('text', ''))
+    if flagged:
+        return True
+    reply = message.get('replyTo')
+    if isinstance(reply, dict):
+        _, flagged = guard_message_text(reply.get('text', ''))
+        return flagged
+    return False
+
 def counted_message_text(text, count):
     if count <= 1:
         return text
@@ -315,6 +325,16 @@ def limited_messages(messages, limit, *, from_end=False):
 context_count = sum(
     len(limited_messages(msgs, context_messages_per_group, from_end=True))
     for msgs in context_by_group.values()
+)
+suspected_prompt_injection_count = sum(
+    1 for message in recent_msgs
+    if message_has_suspected_prompt_injection(message)
+)
+context_suspected_prompt_injection_count = sum(
+    1
+    for messages in context_by_group.values()
+    for message in limited_messages(messages, context_messages_per_group, from_end=True)
+    if message_has_suspected_prompt_injection(message)
 )
 
 ordered_groups = [grp for grp, _ in sorted(by_group.items(), key=lambda x: -len(x[1]))]
@@ -484,6 +504,8 @@ digest_metadata = {
     'message_count': len(recent_msgs),
     'group_count': len(by_group),
     'context_count': context_count,
+    'suspected_prompt_injection_count': suspected_prompt_injection_count,
+    'context_suspected_prompt_injection_count': context_suspected_prompt_injection_count,
     'context_window_hours': context_window_hours,
     'digest_message_char_limit': digest_message_char_limit,
     'context_message_char_limit': context_message_char_limit,

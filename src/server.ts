@@ -2,10 +2,12 @@ import express from "express";
 import type { WhatsappMonitor } from "./whatsapp.js";
 import { HttpMetrics, renderPrometheus } from "./metrics.js";
 import { renderGallery } from "./gallery.js";
+import { ImageAnalysisService } from "./imageAnalysis.js";
 
 export function startServer(monitor: WhatsappMonitor, port: number): void {
   const app = express();
   const httpMetrics = new HttpMetrics();
+  const imageAnalysis = new ImageAnalysisService(monitor);
   const sendMessageToken = process.env.WHATSAPP_SEND_TOKEN?.trim();
   const mediaToken = process.env.WHATSAPP_MEDIA_TOKEN?.trim();
 
@@ -37,7 +39,7 @@ export function startServer(monitor: WhatsappMonitor, port: number): void {
     response.json(monitor.getListings(100));
   });
 
-  app.get("/gallery", (request, response) => {
+  app.get("/gallery", async (request, response) => {
     if (mediaToken && request.query.token !== mediaToken) {
       response.status(401).send("Unauthorized");
       return;
@@ -52,16 +54,64 @@ export function startServer(monitor: WhatsappMonitor, port: number): void {
     }
 
     const items = monitor.getMediaGallery(groupId, from, to);
+    const analysisByMediaId = await imageAnalysis.recordsByMediaId(groupId);
+    for (const item of items) {
+      item.analysis = analysisByMediaId.get(item.id);
+    }
+    imageAnalysis.enqueueGallery(items);
     response.type("html").send(renderGallery(items, mediaToken));
   });
 
+  app.get("/api/image-analysis", async (request, response) => {
+    if (!authorizeMediaRequest(request, mediaToken)) {
+      response.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+    const groupId = typeof request.query.groupId === "string" ? request.query.groupId : undefined;
+    const mediaId = typeof request.query.mediaId === "string" ? request.query.mediaId : undefined;
+    response.json({
+      records: await imageAnalysis.records(groupId, mediaId),
+      queue: imageAnalysis.stats(),
+    });
+  });
+
+  app.post("/api/image-analysis/run", (request, response) => {
+    if (!authorizeMediaRequest(request, mediaToken)) {
+      response.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+    const body = request.body as Partial<{ groupId: string; mediaId: string; force: boolean }>;
+    const groupId = typeof body.groupId === "string" && body.groupId ? body.groupId : undefined;
+    const mediaId = typeof body.mediaId === "string" && body.mediaId ? body.mediaId : undefined;
+    if (!groupId && !mediaId) {
+      response.status(400).json({ error: "Set groupId or mediaId" });
+      return;
+    }
+    const queued = imageAnalysis.enqueueTargets(groupId, mediaId, Boolean(body.force));
+    response.json({ ok: true, queued, queue: imageAnalysis.stats() });
+  });
+
+  app.get("/api/image-analysis/:groupId/:messageId/preview/:kind", async (request, response) => {
+    if (!authorizeMediaRequest(request, mediaToken)) {
+      response.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+    const previewPath = await imageAnalysis.previewPath(
+      request.params.groupId,
+      request.params.messageId,
+      request.params.kind,
+    );
+    if (!previewPath) {
+      response.status(404).json({ error: "Preview not found" });
+      return;
+    }
+    response.type("png").sendFile(previewPath);
+  });
+
   app.get("/media/:groupId/:messageId", async (request, response) => {
-    if (mediaToken) {
-      const token = request.query.token ?? request.header("x-api-key");
-      if (token !== mediaToken) {
-        response.status(401).json({ error: "Unauthorized" });
-        return;
-      }
+    if (!authorizeMediaRequest(request, mediaToken)) {
+      response.status(401).json({ error: "Unauthorized" });
+      return;
     }
 
     try {
@@ -152,11 +202,12 @@ export function startServer(monitor: WhatsappMonitor, port: number): void {
     }
   });
 
-  app.get("/metrics", (_request, response) => {
+  app.get("/metrics", async (_request, response) => {
     response
       .type("text/plain; version=0.0.4; charset=utf-8")
       .send(renderPrometheus([
         ...monitor.getMetricSamples(),
+        ...await imageAnalysis.getMetricSamples(),
         ...httpMetrics.samples(),
       ]));
   });
@@ -172,6 +223,12 @@ export function startServer(monitor: WhatsappMonitor, port: number): void {
   app.listen(port, () => {
     console.log(`HTTP API listening on http://localhost:${port}`);
   });
+}
+
+function authorizeMediaRequest(request: express.Request, mediaToken: string | undefined): boolean {
+  if (!mediaToken) return true;
+  const token = request.query.token ?? request.header("x-api-key");
+  return token === mediaToken;
 }
 
 function safeHeaderFilename(fileName: string): string {

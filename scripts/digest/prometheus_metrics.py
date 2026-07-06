@@ -59,6 +59,53 @@ def _line(name, value, labels=None):
     return f"{name}{_format_labels(_labels(labels))} {value}"
 
 
+def _llm_metric_lines(metrics):
+    lines = [
+        "# HELP whatsapp_digest_llm_last_request_duration_seconds Duration of the latest LLM request made by the digest cron job.",
+        "# TYPE whatsapp_digest_llm_last_request_duration_seconds gauge",
+        "# HELP whatsapp_digest_llm_last_prompt_tokens Prompt tokens used by the latest LLM request.",
+        "# TYPE whatsapp_digest_llm_last_prompt_tokens gauge",
+        "# HELP whatsapp_digest_llm_last_completion_tokens Completion tokens returned by the latest LLM request.",
+        "# TYPE whatsapp_digest_llm_last_completion_tokens gauge",
+        "# HELP whatsapp_digest_llm_last_total_tokens Total tokens used by the latest LLM request.",
+        "# TYPE whatsapp_digest_llm_last_total_tokens gauge",
+        "# HELP whatsapp_digest_llm_last_prompt_chars Prompt characters sent by the latest LLM request.",
+        "# TYPE whatsapp_digest_llm_last_prompt_chars gauge",
+        "# HELP whatsapp_digest_llm_last_completion_chars Completion characters returned by the latest LLM request.",
+        "# TYPE whatsapp_digest_llm_last_completion_chars gauge",
+    ]
+    for metric in metrics or []:
+        labels = {
+            "provider": metric.get("provider") or "unknown",
+            "model": metric.get("model") or "unknown",
+            "phase": metric.get("phase") or "unknown",
+            "status": metric.get("status") or "unknown",
+            "source": metric.get("token_source") or "unknown",
+        }
+        prompt_tokens = _int(metric.get("prompt_tokens"), -1)
+        completion_tokens = _int(metric.get("completion_tokens"), -1)
+        total_tokens = _int(metric.get("total_tokens"), prompt_tokens + completion_tokens)
+        lines.extend(
+            [
+                _line(
+                    "whatsapp_digest_llm_last_request_duration_seconds",
+                    f"{_float(metric.get('duration_seconds')):.6f}",
+                    labels,
+                ),
+                _line("whatsapp_digest_llm_last_prompt_tokens", prompt_tokens, labels),
+                _line("whatsapp_digest_llm_last_completion_tokens", completion_tokens, labels),
+                _line("whatsapp_digest_llm_last_total_tokens", total_tokens, labels),
+                _line("whatsapp_digest_llm_last_prompt_chars", _int(metric.get("prompt_chars")), labels),
+                _line(
+                    "whatsapp_digest_llm_last_completion_chars",
+                    _int(metric.get("completion_chars")),
+                    labels,
+                ),
+            ]
+        )
+    return lines
+
+
 def render_digest_metrics(**fields):
     status = fields.get("status") or "unknown"
     now = _float(fields.get("now"), time.time())
@@ -86,6 +133,20 @@ def render_digest_metrics(**fields):
         "# HELP whatsapp_digest_last_group_count Number of groups with new messages in the latest digest cron run.",
         "# TYPE whatsapp_digest_last_group_count gauge",
         _line("whatsapp_digest_last_group_count", _int(fields.get("group_count")), {"status": status}),
+        "# HELP whatsapp_digest_last_suspected_prompt_injection_count Number of latest-window messages omitted from the digest because they matched prompt-injection guardrails.",
+        "# TYPE whatsapp_digest_last_suspected_prompt_injection_count gauge",
+        _line(
+            "whatsapp_digest_last_suspected_prompt_injection_count",
+            _int(fields.get("suspected_prompt_injection_count")),
+            {"status": status},
+        ),
+        "# HELP whatsapp_digest_last_context_suspected_prompt_injection_count Number of context-window messages omitted from the digest because they matched prompt-injection guardrails.",
+        "# TYPE whatsapp_digest_last_context_suspected_prompt_injection_count gauge",
+        _line(
+            "whatsapp_digest_last_context_suspected_prompt_injection_count",
+            _int(fields.get("context_suspected_prompt_injection_count")),
+            {"status": status},
+        ),
         "# HELP whatsapp_digest_last_sent_to_telegram Whether the latest digest run sent at least one Telegram message.",
         "# TYPE whatsapp_digest_last_sent_to_telegram gauge",
         _line("whatsapp_digest_last_sent_to_telegram", _int(fields.get("sent_to_telegram")), {"status": status}),
@@ -112,6 +173,7 @@ def render_digest_metrics(**fields):
             _float(fields.get("last_message_ts")) / 1000,
             {"status": status},
         ),
+        *_llm_metric_lines(fields.get("llm_metrics")),
         "",
     ]
     return "\n".join(str(line) for line in lines)
@@ -144,7 +206,7 @@ def emit_digest_metrics(log, **fields):
 
     timeout = _float(os.environ.get("PROMETHEUS_METRICS_TIMEOUT_SECONDS"), 10.0)
     try:
-        response = requests.post(
+        response = requests.put(
             push_url,
             data=rendered.encode("utf-8"),
             headers={"Content-Type": "text/plain; version=0.0.4; charset=utf-8"},

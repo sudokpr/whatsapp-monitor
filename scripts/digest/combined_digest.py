@@ -9,6 +9,7 @@ import runpy
 import signal
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 import requests
@@ -35,6 +36,7 @@ ENV_FILE = REPO_DIR / ".env"
 STATE_KEY = os.environ.get("DIGEST_STATE_KEY", "last_processed_ts")
 LEGACY_STATE_KEYS = ("last_processed_ts", "last_processed_ts_gemini", "last_processed_ts_ollama")
 RUN_STARTED_AT = datetime.datetime.now().timestamp()
+LLM_METRICS = []
 
 
 def load_env_file(path):
@@ -102,6 +104,46 @@ def log(message):
         print(line)
     with open(LOG_FILE, "a", encoding="utf-8") as handle:
         handle.write(line + "\n")
+
+
+def estimate_tokens(text):
+    if not text:
+        return 0
+    try:
+        import tiktoken
+
+        encoding = tiktoken.get_encoding("o200k_base")
+        return len(encoding.encode(text))
+    except Exception:
+        return max(1, round(len(text) / 4))
+
+
+def record_llm_metric(provider, model, phase, status, started_at, prompt, completion="", usage=None, token_source="estimated"):
+    usage = usage or {}
+    prompt_tokens = usage.get("prompt_tokens")
+    completion_tokens = usage.get("completion_tokens")
+    total_tokens = usage.get("total_tokens")
+    if prompt_tokens is None:
+        prompt_tokens = estimate_tokens(prompt)
+    if completion_tokens is None:
+        completion_tokens = estimate_tokens(completion)
+    if total_tokens is None:
+        total_tokens = int(prompt_tokens) + int(completion_tokens)
+    LLM_METRICS.append(
+        {
+            "provider": provider,
+            "model": model,
+            "phase": phase,
+            "status": status,
+            "token_source": token_source,
+            "duration_seconds": max(0.0, time.monotonic() - started_at),
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "prompt_chars": len(prompt or ""),
+            "completion_chars": len(completion or ""),
+        }
+    )
 
 
 def ensure_schema():
@@ -326,6 +368,7 @@ def split_digest_for_ollama(raw_digest, max_chars):
 
 
 def call_ollama_prompt(model, prompt, label="request"):
+    started_at = time.monotonic()
     try:
         log(f"Ollama {model} {label}: prompt_size={len(prompt)} chars, timeout={OLLAMA_TIMEOUT_SECONDS}s")
         headers = {"Authorization": f"Bearer {OLLAMA_API_KEY}"} if OLLAMA_API_KEY else None
@@ -342,10 +385,30 @@ def call_ollama_prompt(model, prompt, label="request"):
         )
         if response.status_code != 200:
             log(f"Ollama {model} {label} failed: {response.status_code} - {response.text}")
+            record_llm_metric("ollama", model, label, "failure", started_at, prompt, token_source="actual")
             return ""
-        return clean_llm_summary(response.json().get("message", {}).get("content", "").strip())
+        payload = response.json()
+        summary = clean_llm_summary(payload.get("message", {}).get("content", "").strip())
+        usage = {
+            "prompt_tokens": payload.get("prompt_eval_count"),
+            "completion_tokens": payload.get("eval_count"),
+        }
+        usage["total_tokens"] = (usage["prompt_tokens"] or 0) + (usage["completion_tokens"] or 0)
+        record_llm_metric(
+            "ollama",
+            model,
+            label,
+            "success" if summary else "empty",
+            started_at,
+            prompt,
+            summary,
+            usage=usage,
+            token_source="actual",
+        )
+        return summary
     except Exception as exc:
         log(f"Ollama {model} {label} failed: {exc}")
+        record_llm_metric("ollama", model, label, "failure", started_at, prompt, token_source="estimated")
         return ""
 
 
@@ -410,7 +473,7 @@ def call_ollama_models(raw_digest, metadata):
     return summaries, telegram_sent_any, whatsapp_sent_any
 
 
-def call_codex(prompt):
+def call_codex(prompt, label="summary"):
     codex_env = os.environ.copy()
     for key in (
         "CODEX_LLM_CWD",
@@ -429,6 +492,8 @@ def call_codex(prompt):
         raise TimeoutError
 
     old_handler = signal.getsignal(signal.SIGALRM)
+    started_at = time.monotonic()
+    model = cfg.model or "default"
     try:
         log(f"Codex LLM request: prompt_size={len(prompt)} chars, timeout={CODEX_TIMEOUT_SECONDS}s")
         signal.signal(signal.SIGALRM, timeout_handler)
@@ -436,14 +501,18 @@ def call_codex(prompt):
         result = ask_codex_text(prompt, cfg)
     except TimeoutError:
         log(f"Codex LLM timed out after {CODEX_TIMEOUT_SECONDS}s")
+        record_llm_metric("codex", model, label, "timeout", started_at, prompt)
         return ""
     except Exception as exc:
         log(f"Codex LLM failed: {exc}")
+        record_llm_metric("codex", model, label, "failure", started_at, prompt)
         return ""
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, old_handler)
-    return clean_llm_summary(result.strip())
+    summary = clean_llm_summary(result.strip())
+    record_llm_metric("codex", model, label, "success" if summary else "empty", started_at, prompt, summary)
+    return summary
 
 
 def compare_model_summaries(model_summaries, reference_digest):
@@ -455,7 +524,7 @@ def compare_model_summaries(model_summaries, reference_digest):
         return ""
     comparison_prompt = build_model_comparison_prompt(model_summaries, reference_digest)
     log(f"Model comparison request: summaries={len(model_summaries)}, prompt_size={len(comparison_prompt)} chars")
-    return call_codex(comparison_prompt)
+    return call_codex(comparison_prompt, "comparison")
 
 
 def format_delivery_message(label, summary, metadata=None):
@@ -657,6 +726,10 @@ def main():
     message_count = int(metadata.get("message_count", 0))
     group_count = int(metadata.get("group_count", 0))
     last_message_ts = int(metadata.get("last_message_ts", 0) or 0)
+    suspected_prompt_injection_count = int(metadata.get("suspected_prompt_injection_count", 0) or 0)
+    context_suspected_prompt_injection_count = int(
+        metadata.get("context_suspected_prompt_injection_count", 0) or 0
+    )
     log(f"Digest window: messages={message_count}, groups={group_count}, start={metadata.get('window_start', '')}")
     if message_count == 0:
         log("No new messages; state unchanged")
@@ -673,6 +746,9 @@ def main():
             whatsapp_enabled=1 if SEND_WHATSAPP else 0,
             last_processed_ts=metadata.get("last_processed_ts", 0),
             last_message_ts=metadata.get("last_message_ts", 0),
+            suspected_prompt_injection_count=suspected_prompt_injection_count,
+            context_suspected_prompt_injection_count=context_suspected_prompt_injection_count,
+            llm_metrics=LLM_METRICS,
         )
         return
 
@@ -756,6 +832,9 @@ def main():
         whatsapp_enabled=1 if SEND_WHATSAPP else 0,
         last_processed_ts=last_message_ts,
         last_message_ts=last_message_ts,
+        suspected_prompt_injection_count=suspected_prompt_injection_count,
+        context_suspected_prompt_injection_count=context_suspected_prompt_injection_count,
+        llm_metrics=LLM_METRICS,
     )
 
 
@@ -771,5 +850,6 @@ if __name__ == "__main__":
             now=datetime.datetime.now().timestamp(),
             telegram_enabled=1 if SEND_TELEGRAM else 0,
             whatsapp_enabled=1 if SEND_WHATSAPP else 0,
+            llm_metrics=LLM_METRICS,
         )
         sys.exit(1)

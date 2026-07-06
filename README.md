@@ -23,7 +23,8 @@ The API listens on port `3000` unless `PORT` is set:
   `WHATSAPP_MEDIA_TOKEN` is set, pass it as `?token=...` or `x-api-key`.
 - `GET /stats` returns daily message counts and top users/groups
 - `GET /metrics` returns Prometheus text metrics for monitor health, WhatsApp
-  connection state, message capture, persistence, and API requests
+  connection state, message capture, persistence, local storage, and API
+  requests
 - `POST /send-message` sends a WhatsApp text message through the active
   Baileys connection with JSON body `{ "jid": "...", "text": "..." }`.
   If `WHATSAPP_SEND_TOKEN` is set, pass it as `x-api-key` or a bearer token.
@@ -85,9 +86,88 @@ to download and decrypt the media from WhatsApp if it is still available. Set
 `WHATSAPP_MEDIA_BASE_URL` to a URL reachable from where you read the digest, and
 set `WHATSAPP_MEDIA_TOKEN` if you want those links token-protected.
 The responsive gallery lazily streams photos and video ranges from WhatsApp and
-does not write media files to the Pi.
+does not write media files to the Pi except for short-lived image-analysis temp
+files.
 `npm run digest:preview` exercises the pipeline without delivery sends or state
 advancement.
+
+### Image analysis
+
+The media gallery can analyse image and sticker quality in the background using
+classical Python image-processing code. The monitor downloads each queued image
+to `data/image-analysis/cache/`, runs `scripts/analyse_images.py --file ...`,
+then deletes the temp media file. Results are stored in SQLite at
+`data/image_analysis.db`; derived previews are stored under
+`data/image-analysis/previews/`.
+
+Install the Python dependencies before using the analyzer:
+
+```bash
+npm run py:sync
+```
+
+Opening a gallery page queues missing image analyses automatically. Existing
+successful rows are skipped unless forced. To queue old images from the command
+line while the monitor is running:
+
+```bash
+python scripts/analyse_images.py --group-id GROUP_ID
+python scripts/analyse_images.py --group-id GROUP_ID --force
+python scripts/analyse_images.py --media-id MEDIA_ID
+```
+
+If `WHATSAPP_MEDIA_TOKEN` is set, pass it through the environment or with
+`--token`. The same operation is available over HTTP:
+
+- `POST /api/image-analysis/run` with `{ "groupId": "...", "force": false }`
+- `GET /api/image-analysis?groupId=...`
+- `GET /api/image-analysis/:groupId/:messageId/preview/:kind` where `kind` is
+  `grayscale`, `edges`, `fourier`, or `histogram`
+
+Configurable thresholds:
+
+```bash
+IMAGE_ANALYSIS_CONCURRENCY=1
+IMAGE_ANALYSIS_MAX_DIMENSION=1024
+IMAGE_ANALYSIS_BLUR_BLURRY=80
+IMAGE_ANALYSIS_BLUR_SLIGHTLY_BLURRY=180
+IMAGE_ANALYSIS_DUPLICATE_HASH_DISTANCE=4
+IMAGE_ANALYSIS_SIMILAR_HASH_DISTANCE=6
+IMAGE_ANALYSIS_HEAVY_BLOCKINESS=9
+```
+
+The first version intentionally uses understandable signal-processing
+operations: grayscale intensity for brightness/contrast, variance of the
+Laplacian for blur, Canny edges for edge density, a high-pass residual for an
+approximate noise estimate, lightweight colour clustering, perceptual hashes,
+an approximate JPEG blockiness score, and a 2D FFT for educational frequency
+energy diagnostics. Noise, compression, and Fourier metrics are estimates, not
+definitive image-quality judgements.
+
+Example JSON output:
+
+```json
+{
+  "media_id": "3EB0...",
+  "group_id": "1203...@g.us",
+  "status": "success",
+  "width": 1600,
+  "height": 1200,
+  "brightness_mean": 141.6,
+  "brightness_label": "normal",
+  "contrast_stddev": 52.4,
+  "blur_score": 236.8,
+  "blur_label": "sharp",
+  "edge_density": 0.083,
+  "noise_score": 4.7,
+  "dominant_colors": [{ "rgb": [210, 204, 190], "percent": 0.32 }],
+  "similar_matches": [],
+  "compression_label": "normal",
+  "low_frequency_energy": 0.91,
+  "medium_frequency_energy": 0.08,
+  "high_frequency_energy": 0.01
+}
+```
 
 `npm run py:sync` uses `uv sync --prerelease allow` because the Codex Python
 client currently resolves through pre-release packages.
@@ -113,6 +193,39 @@ Example cron entry:
 
 The monitor exposes scrape metrics at `GET /metrics`.
 
+Storage metrics are emitted by the monitor process:
+
+- `whatsapp_storage_data_dir_bytes`
+- `whatsapp_storage_messages_jsonl_bytes`
+- `whatsapp_storage_archive_bytes`
+- `whatsapp_storage_archive_files`
+- `whatsapp_storage_free_bytes`
+- `whatsapp_storage_total_bytes`
+
+Image analysis metrics are emitted by the monitor process when the gallery
+analyzer is enabled:
+
+- `whatsapp_image_analysis_queue_depth`
+- `whatsapp_image_analysis_running`
+- `whatsapp_image_analysis_concurrency`
+- `whatsapp_image_analysis_enqueued_total`
+- `whatsapp_image_analysis_skipped_existing_total`
+- `whatsapp_image_analysis_runs_total{status="success|error"}`
+- `whatsapp_image_analysis_duration_seconds_bucket`
+- `whatsapp_image_analysis_duration_seconds_sum`
+- `whatsapp_image_analysis_duration_seconds_count`
+- `whatsapp_image_analysis_last_duration_seconds`
+- `whatsapp_image_analysis_last_run_timestamp_seconds`
+- `whatsapp_image_analysis_last_success_timestamp_seconds`
+- `whatsapp_image_analysis_last_failure_timestamp_seconds`
+- `whatsapp_image_analysis_records{status="success|error|processing"}`
+- `whatsapp_image_analysis_signal_records{signal="blurry|dark|duplicates|compressed|screenshots"}`
+
+Average image analysis latency can be queried with
+`rate(whatsapp_image_analysis_duration_seconds_sum[5m]) / rate(whatsapp_image_analysis_duration_seconds_count[5m])`.
+P99 image analysis latency can be queried with
+`histogram_quantile(0.99, rate(whatsapp_image_analysis_duration_seconds_bucket[5m]))`.
+
 The digest cron job can also emit one Prometheus text snapshot per run:
 
 ```bash
@@ -127,3 +240,47 @@ PROMETHEUS_METRICS_PASSWORD=
 ingestion endpoint, such as a Pushgateway grouping URL or a text import endpoint.
 Strict Prometheus remote-write endpoints require protobuf/snappy encoding; point
 those through an agent or gateway that accepts text exposition.
+
+Digest run metrics:
+
+- `whatsapp_digest_last_run_timestamp_seconds`
+- `whatsapp_digest_last_success_timestamp_seconds`
+- `whatsapp_digest_last_failure_timestamp_seconds`
+- `whatsapp_digest_last_duration_seconds`
+- `whatsapp_digest_last_message_count`
+- `whatsapp_digest_last_group_count`
+- `whatsapp_digest_last_suspected_prompt_injection_count`
+- `whatsapp_digest_last_context_suspected_prompt_injection_count`
+- `whatsapp_digest_last_sent_to_telegram`
+- `whatsapp_digest_telegram_enabled`
+- `whatsapp_digest_last_sent_to_whatsapp`
+- `whatsapp_digest_whatsapp_enabled`
+- `whatsapp_digest_state_last_processed_timestamp_seconds`
+- `whatsapp_digest_last_message_timestamp_seconds`
+
+Digest LLM request metrics are labeled by `provider`, `model`, `phase`,
+`status`, and `source`:
+
+- `whatsapp_digest_llm_last_request_duration_seconds`
+- `whatsapp_digest_llm_last_prompt_tokens`
+- `whatsapp_digest_llm_last_completion_tokens`
+- `whatsapp_digest_llm_last_total_tokens`
+- `whatsapp_digest_llm_last_prompt_chars`
+- `whatsapp_digest_llm_last_completion_chars`
+
+The daily DietPi backup job can emit a Prometheus text snapshot and push it to
+a Pushgateway-compatible endpoint:
+
+```bash
+BACKUP_PROMETHEUS_METRICS_ENABLED=true
+BACKUP_PROMETHEUS_METRICS_FILE=data/metrics/whatsapp_backup.prom
+BACKUP_PROMETHEUS_METRICS_PUSH_URL=http://prometheus-pushgateway:9091/metrics/job/whatsapp_backup
+```
+
+Backup run metrics:
+
+- `whatsapp_backup_last_run_timestamp_seconds`
+- `whatsapp_backup_last_success_timestamp_seconds`
+- `whatsapp_backup_last_failure_timestamp_seconds`
+- `whatsapp_backup_last_duration_seconds`
+- `whatsapp_backup_last_exit_code`

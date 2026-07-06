@@ -56,7 +56,14 @@ Important monitor metrics include:
 - `whatsapp_message_persist_failures_total`
 - `whatsapp_last_message_timestamp_seconds`
 - `whatsapp_last_message_age_seconds`
+- `whatsapp_last_persist_timestamp_seconds`
 - `whatsapp_groups_discovered`
+- `whatsapp_storage_data_dir_bytes`
+- `whatsapp_storage_messages_jsonl_bytes`
+- `whatsapp_storage_archive_bytes`
+- `whatsapp_storage_archive_files`
+- `whatsapp_storage_free_bytes`
+- `whatsapp_storage_total_bytes`
 - `whatsapp_http_requests_total`
 - `whatsapp_http_request_duration_seconds_sum`
 - `whatsapp_http_request_duration_seconds_count`

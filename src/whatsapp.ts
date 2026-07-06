@@ -23,7 +23,8 @@ import {
   dataDir,
   type DiscoveredGroup,
 } from "./config.js";
-import { appendFile, mkdir, stat, rename, readFile } from "node:fs/promises";
+import { readdirSync, statfsSync, statSync } from "node:fs";
+import { appendFile, mkdir, stat as statFile, rename, readFile } from "node:fs/promises";
 import path from "node:path";
 import { StatsStore } from "./stats.js";
 import type { MetricSample } from "./metrics.js";
@@ -77,6 +78,8 @@ export interface MediaGalleryItem {
   type: StoredMedia["type"];
   mimeType: string;
   fileName?: string;
+  fileLength?: number;
+  analysis?: unknown;
 }
 
 export class WhatsappMonitor {
@@ -208,6 +211,33 @@ export class WhatsappMonitor {
         type: message.media.type,
         mimeType: message.media.mimeType || defaultMimeType(message.media.type),
         fileName: message.media.fileName,
+        fileLength: message.media.fileLength,
+      });
+    }
+    return [...items.values()].sort((left, right) => left.timestamp - right.timestamp);
+  }
+
+  getImageAnalysisTargets(groupId?: string, mediaId?: string): MediaGalleryItem[] {
+    const items = new Map<string, MediaGalleryItem>();
+    for (const message of this.messages) {
+      if (
+        (groupId && message.groupId !== groupId)
+        || (mediaId && message.id !== mediaId)
+        || !message.media
+        || !["image", "sticker"].includes(message.media.type)
+      ) {
+        continue;
+      }
+      items.set(`${message.groupId}:${message.id}`, {
+        id: message.id,
+        groupId: message.groupId,
+        groupName: message.groupName,
+        timestamp: message.timestamp,
+        text: message.text,
+        type: message.media.type,
+        mimeType: message.media.mimeType || defaultMimeType(message.media.type),
+        fileName: message.media.fileName,
+        fileLength: message.media.fileLength,
       });
     }
     return [...items.values()].sort((left, right) => left.timestamp - right.timestamp);
@@ -259,6 +289,7 @@ export class WhatsappMonitor {
     const lastPersistSeconds = this.lastPersistTimestampMs > 0
       ? this.lastPersistTimestampMs / 1000
       : 0;
+    const storageMetrics = sampleStorageMetrics();
     const samples: MetricSample[] = [
       {
         name: "whatsapp_monitor_up",
@@ -327,6 +358,7 @@ export class WhatsappMonitor {
         type: "gauge",
         value: this.messages.length,
       },
+      ...storageMetrics,
     ];
 
     for (const [labels, count] of this.messagesReceivedTotal) {
@@ -379,7 +411,7 @@ export class WhatsappMonitor {
     try {
       // Rotate if bigger than 100MB
       try {
-        const s = await stat(messagesPath).catch(() => null);
+        const s = await statFile(messagesPath).catch(() => null);
         if (s && s.size > 100 * 1024 * 1024) {
           await mkdir(archiveDir, { recursive: true });
           const ts = new Date().toISOString().replace(/[:.]/g, '-');
@@ -1005,6 +1037,105 @@ function objectKeys(value: unknown): string[] {
 
 function limitForLog(value: string, maxLength: number): string {
   return value.length > maxLength ? `${value.slice(0, maxLength)}...` : value;
+}
+
+function sampleStorageMetrics(): MetricSample[] {
+  const messagesPath = path.join(dataDir, "messages.jsonl");
+  const archiveDir = path.join(dataDir, "archive");
+  const filesystem = safeStatfs(dataDir);
+
+  const samples: MetricSample[] = [
+    {
+      name: "whatsapp_storage_data_dir_bytes",
+      help: "Total bytes used by the WhatsApp monitor data directory.",
+      type: "gauge",
+      value: safePathSize(dataDir),
+    },
+    {
+      name: "whatsapp_storage_messages_jsonl_bytes",
+      help: "Bytes used by the active WhatsApp messages JSONL file.",
+      type: "gauge",
+      value: safePathSize(messagesPath),
+    },
+    {
+      name: "whatsapp_storage_archive_bytes",
+      help: "Bytes used by rotated WhatsApp message archives.",
+      type: "gauge",
+      value: safePathSize(archiveDir),
+    },
+    {
+      name: "whatsapp_storage_archive_files",
+      help: "Number of rotated WhatsApp message archive files.",
+      type: "gauge",
+      value: safeFileCount(archiveDir),
+    },
+  ];
+
+  if (filesystem) {
+    samples.push(
+      {
+        name: "whatsapp_storage_free_bytes",
+        help: "Available bytes on the filesystem containing the WhatsApp monitor data directory.",
+        type: "gauge",
+        value: filesystem.freeBytes,
+      },
+      {
+        name: "whatsapp_storage_total_bytes",
+        help: "Total bytes on the filesystem containing the WhatsApp monitor data directory.",
+        type: "gauge",
+        value: filesystem.totalBytes,
+      },
+    );
+  }
+
+  return samples;
+}
+
+function safeStatfs(targetPath: string): { freeBytes: number; totalBytes: number } | null {
+  try {
+    const stats = statfsSync(targetPath);
+    return {
+      freeBytes: stats.bavail * stats.bsize,
+      totalBytes: stats.blocks * stats.bsize,
+    };
+  } catch (error) {
+    console.warn("Failed to sample storage filesystem metrics:", error);
+    return null;
+  }
+}
+
+function safePathSize(targetPath: string): number {
+  try {
+    const stats = statSync(targetPath);
+    if (stats.isFile()) return stats.size;
+    if (!stats.isDirectory()) return 0;
+    return readdirSync(targetPath, { withFileTypes: true }).reduce((total, entry) => {
+      if (entry.isSymbolicLink()) return total;
+      return total + safePathSize(path.join(targetPath, entry.name));
+    }, 0);
+  } catch (error: any) {
+    if (error?.code !== "ENOENT") {
+      console.warn(`Failed to sample storage size for ${targetPath}:`, error);
+    }
+    return 0;
+  }
+}
+
+function safeFileCount(targetPath: string): number {
+  try {
+    const stats = statSync(targetPath);
+    if (stats.isFile()) return 1;
+    if (!stats.isDirectory()) return 0;
+    return readdirSync(targetPath, { withFileTypes: true }).reduce((total, entry) => {
+      if (entry.isSymbolicLink()) return total;
+      return total + safeFileCount(path.join(targetPath, entry.name));
+    }, 0);
+  } catch (error: any) {
+    if (error?.code !== "ENOENT") {
+      console.warn(`Failed to sample storage file count for ${targetPath}:`, error);
+    }
+    return 0;
+  }
 }
 
 type AnyRecord = Record<string, any>;
