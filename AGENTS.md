@@ -20,6 +20,28 @@ Baileys, plus Python digest sidecar scripts under `scripts/digest/`.
 - Show/follow monitor logs: `make logs`, `make logs-follow`
 - Force a new WhatsApp QR login: `make qr-login`
 
+## Sandbox Notes
+
+The user systemd bus and host network namespace are not reachable from the
+default command sandbox in this environment. Run these with elevated execution
+instead of first trying them inside the sandbox:
+
+- `make service-install`
+- `make service-restart`
+- `make service-stop`
+- `make service-status`
+- `make qr-login`
+- Host/LAN health checks such as `make health` or
+  `curl -fsS http://192.168.100.56:3000/health`
+
+## Browser Testing
+
+Playwright 1.59 is available in `/home/kp/dss/.venv/dss/`. Use
+`/home/kp/dss/.venv/dss/bin/python` for Python Playwright tests. Chromium and
+its headless shell run on this host; WebKit is installed but currently cannot
+launch because its GTK/GStreamer system libraries are missing. Browser tests
+against the monitor's LAN URLs require elevated execution for host networking.
+
 ## Metrics and Alerts
 
 The TypeScript monitor exposes Prometheus text metrics at `GET /metrics`.

@@ -8,7 +8,7 @@ SERVICE_UNIT ?= $(SYSTEMD_USER_DIR)/$(SERVICE)
 NPM_BIN ?= $(shell command -v npm)
 SERVICE_PATH ?= $(PATH)
 
-.PHONY: help install dev build start py-sync digest digest-preview health service-install service-status service-restart service-stop qr-login logs logs-follow digest-logs digest-logs-follow status
+.PHONY: help install dev build start py-sync digest digest-preview health service-install service-status service-restart service-stop qr-login logs logs-follow digest-logs digest-logs-follow status backup-run backup-timers backup-status backup-logs backup-logs-follow
 
 help:
 	@printf '%s\n' \
@@ -30,7 +30,12 @@ help:
 		'  logs                Show recent monitor service logs' \
 		'  logs-follow         Follow monitor service logs' \
 		'  digest-logs         Show recent digest cron log lines' \
-		'  digest-logs-follow  Follow digest cron log'
+		'  digest-logs-follow  Follow digest cron log' \
+		'  backup-run          Run the DietPi backup now' \
+		'  backup-timers       Show the DietPi backup timer schedule' \
+		'  backup-status       Show the DietPi backup service/timer status' \
+		'  backup-logs         Show recent DietPi backup logs' \
+		'  backup-logs-follow  Follow DietPi backup logs'
 
 install:
 	npm install
@@ -102,3 +107,18 @@ digest-logs:
 
 digest-logs-follow:
 	tail -f data/summary.log
+
+backup-run:
+	systemctl --user start whatsapp-group-monitor-backup.service
+
+backup-timers:
+	systemctl --user list-timers whatsapp-group-monitor-backup.timer --no-pager
+
+backup-status:
+	systemctl --user status whatsapp-group-monitor-backup.timer whatsapp-group-monitor-backup.service --no-pager
+
+backup-logs:
+	journalctl --user -u whatsapp-group-monitor-backup.service -n $(LOG_LINES) --no-pager
+
+backup-logs-follow:
+	journalctl --user -u whatsapp-group-monitor-backup.service -f

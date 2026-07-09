@@ -9,6 +9,10 @@ import {
   getContentType,
   normalizeMessageContent,
 } from "@whiskeysockets/baileys/lib/Utils/messages.js";
+import {
+  downloadContentFromMessage,
+} from "@whiskeysockets/baileys/lib/Utils/messages-media.js";
+import type { MediaType } from "@whiskeysockets/baileys/lib/Types/index.js";
 import { Boom } from "@hapi/boom";
 import pino from "pino";
 import qrcode from "qrcode-terminal";
@@ -29,8 +33,50 @@ export interface StoredMessage {
   text: string;
   timestamp: number;
   sender: string;
+  senderName?: string;
   groupId: string;
   groupName: string;
+  media?: StoredMedia;
+  replyTo?: StoredReply;
+}
+
+export interface StoredReply {
+  id: string;
+  sender?: string;
+  text?: string;
+}
+
+export interface StoredMedia {
+  type: "image" | "video" | "document" | "audio" | "sticker";
+  mediaKey: string;
+  directPath?: string;
+  url?: string;
+  mimeType?: string;
+  fileName?: string;
+  fileLength?: number;
+}
+
+export interface MediaDownload {
+  stream: NodeJS.ReadableStream;
+  mimeType: string;
+  fileName: string;
+  fileLength?: number;
+}
+
+export interface MediaByteRange {
+  startByte?: number;
+  endByte?: number;
+}
+
+export interface MediaGalleryItem {
+  id: string;
+  groupId: string;
+  groupName: string;
+  timestamp: number;
+  text: string;
+  type: StoredMedia["type"];
+  mimeType: string;
+  fileName?: string;
 }
 
 export class WhatsappMonitor {
@@ -139,6 +185,61 @@ export class WhatsappMonitor {
 
   getListings(limit: number): StoredMessage[] {
     return this.messages.slice(-Math.max(0, limit));
+  }
+
+  getMediaGallery(groupId: string, from: number, to: number): MediaGalleryItem[] {
+    const items = new Map<string, MediaGalleryItem>();
+    for (const message of this.messages) {
+      if (
+        message.groupId !== groupId
+        || message.timestamp < from
+        || message.timestamp > to
+        || !message.media
+        || !isGalleryMedia(message.media)
+      ) {
+        continue;
+      }
+      items.set(message.id, {
+        id: message.id,
+        groupId: message.groupId,
+        groupName: message.groupName,
+        timestamp: message.timestamp,
+        text: message.text,
+        type: message.media.type,
+        mimeType: message.media.mimeType || defaultMimeType(message.media.type),
+        fileName: message.media.fileName,
+      });
+    }
+    return [...items.values()].sort((left, right) => left.timestamp - right.timestamp);
+  }
+
+  async downloadStoredMedia(
+    groupId: string,
+    messageId: string,
+    range: MediaByteRange = {},
+  ): Promise<MediaDownload | null> {
+    const message = await this.findStoredMessage(groupId, messageId);
+    const media = message?.media;
+    if (!message || !media) {
+      return null;
+    }
+
+    const stream = await downloadContentFromMessage(
+      {
+        mediaKey: Buffer.from(media.mediaKey, "base64"),
+        directPath: media.directPath,
+        url: media.url,
+      },
+      media.type as MediaType,
+      range,
+    );
+
+    return {
+      stream,
+      mimeType: media.mimeType || defaultMimeType(media.type),
+      fileName: media.fileName || `${message.id}.${defaultExtension(media.type, media.mimeType)}`,
+      fileLength: media.fileLength,
+    };
   }
 
   async sendTextMessage(jid: string, text: string): Promise<string | null> {
@@ -298,6 +399,35 @@ export class WhatsappMonitor {
     }
   }
 
+  private async findStoredMessage(groupId: string, messageId: string): Promise<StoredMessage | null> {
+    const buffered = [...this.messages].reverse().find((message) =>
+      message.groupId === groupId && message.id === messageId
+    );
+    if (buffered) {
+      return buffered;
+    }
+
+    const messagesPath = path.join(dataDir, 'messages.jsonl');
+    try {
+      const raw = await readFile(messagesPath, 'utf8');
+      const lines = raw.split('\n').filter(Boolean);
+      for (let index = lines.length - 1; index >= 0; index -= 1) {
+        try {
+          const message = JSON.parse(lines[index]) as StoredMessage;
+          if (message.groupId === groupId && message.id === messageId) {
+            return message;
+          }
+        } catch {
+          continue;
+        }
+      }
+    } catch (e: any) {
+      if (e.code !== 'ENOENT') console.warn('Failed to scan persisted messages for media:', e);
+    }
+
+    return null;
+  }
+
   private async discoverGroups(sock: ReturnType<typeof makeWASocket>): Promise<void> {
     console.log("Discovering WhatsApp groups.");
     const groupMetadata = await sock.groupFetchAllParticipating();
@@ -320,7 +450,8 @@ export class WhatsappMonitor {
 
   private async handleMessage(message: WAMessage, upsertType?: string): Promise<void> {
     const remote = message.key.remoteJid;
-    const text = extractText(message);
+    const media = extractMedia(message);
+    const text = extractText(message) ?? mediaPlaceholder(media);
 
     // ignore messages without content or id
     if (!remote || !message.key.id) {
@@ -354,9 +485,10 @@ export class WhatsappMonitor {
       return;
     }
 
+    const senderName = extractSenderName(message);
     const groupName = isGroup
       ? await this.getGroupName(remote)
-      : `DM:${message.key.participant ?? remote}`;
+      : `DM:${senderName ?? message.key.participant ?? remote}`;
 
     const timestamp = timestampToMs(message.messageTimestamp);
     const storedMessage: StoredMessage = {
@@ -364,8 +496,11 @@ export class WhatsappMonitor {
       text,
       timestamp,
       sender: message.key.participant ?? (isGroup ? 'unknown' : remote),
+      senderName,
       groupId: remote,
       groupName,
+      media,
+      replyTo: extractReplyTo(message),
     };
 
     console.log(`Incoming ${isGroup ? 'group' : 'DM'} message [${groupName}]: ${text}`);
@@ -464,6 +599,147 @@ function extractText(message: WAMessage): string | undefined {
   )?.trim();
 }
 
+function extractMedia(message: WAMessage): StoredMedia | undefined {
+  const content = normalizeMessageContent(message.message);
+  const mediaCandidates: Array<[StoredMedia["type"], AnyRecord | undefined]> = [
+    ["image", asRecord(content?.imageMessage)],
+    ["video", asRecord(content?.videoMessage)],
+    ["document", asRecord(content?.documentMessage)],
+    ["document", asRecord(content?.documentWithCaptionMessage?.message?.documentMessage)],
+    ["audio", asRecord(content?.audioMessage)],
+    ["sticker", asRecord(content?.stickerMessage)],
+  ];
+
+  for (const [type, media] of mediaCandidates) {
+    if (!media) {
+      continue;
+    }
+
+    const mediaKey = bytesToBase64(media.mediaKey);
+    const directPath = textValue(media.directPath);
+    const url = textValue(media.url);
+    if (!mediaKey || (!directPath && !url)) {
+      continue;
+    }
+
+    return {
+      type,
+      mediaKey,
+      directPath,
+      url,
+      mimeType: textValue(media.mimetype),
+      fileName: textValue(media.fileName),
+      fileLength: numberValue(media.fileLength),
+    };
+  }
+
+  return undefined;
+}
+
+function extractReplyTo(message: WAMessage): StoredReply | undefined {
+  const content = normalizeMessageContent(message.message);
+  const contextInfo = firstRecord(
+    content?.extendedTextMessage?.contextInfo,
+    content?.imageMessage?.contextInfo,
+    content?.videoMessage?.contextInfo,
+    content?.documentMessage?.contextInfo,
+    content?.documentWithCaptionMessage?.message?.documentMessage?.contextInfo,
+    content?.buttonsResponseMessage?.contextInfo,
+    content?.listResponseMessage?.contextInfo,
+    content?.templateButtonReplyMessage?.contextInfo,
+    content?.interactiveResponseMessage?.contextInfo,
+  );
+  const quotedId = textValue(contextInfo?.stanzaId);
+  if (!quotedId) {
+    return undefined;
+  }
+
+  const quotedMessage = asRecord(contextInfo?.quotedMessage);
+  const quotedText = quotedMessage
+    ? extractText({ message: quotedMessage } as WAMessage)
+    : undefined;
+
+  return {
+    id: quotedId,
+    sender: textValue(contextInfo?.participant),
+    text: quotedText,
+  };
+}
+
+function bytesToBase64(value: unknown): string | undefined {
+  if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
+    return Buffer.from(value).toString("base64");
+  }
+  if (typeof value === "string" && value.trim()) {
+    return Buffer.from(value, "base64").toString("base64");
+  }
+  return undefined;
+}
+
+function numberValue(value: unknown): number | undefined {
+  if (typeof value === "number") {
+    return value;
+  }
+  if (typeof value === "object" && value !== null && "toNumber" in value && typeof value.toNumber === "function") {
+    return value.toNumber();
+  }
+  return undefined;
+}
+
+function defaultMimeType(type: StoredMedia["type"]): string {
+  switch (type) {
+    case "image":
+      return "image/jpeg";
+    case "video":
+      return "video/mp4";
+    case "audio":
+      return "audio/ogg";
+    case "sticker":
+      return "image/webp";
+    case "document":
+    default:
+      return "application/octet-stream";
+  }
+}
+
+function isGalleryMedia(media: StoredMedia): boolean {
+  return ["image", "video", "sticker"].includes(media.type)
+    || (media.type === "document" && media.mimeType?.toLowerCase() === "application/pdf");
+}
+
+function mediaPlaceholder(media: StoredMedia | undefined): string | undefined {
+  if (!media) return undefined;
+  if (media.type === "image") return "Shared a photo";
+  if (media.type === "video") return "Shared a video";
+  if (media.type === "sticker") return "Shared a sticker";
+  if (media.type === "audio") return "Shared an audio message";
+  return media.fileName ? `Shared document: ${media.fileName}` : "Shared a document";
+}
+
+function defaultExtension(type: StoredMedia["type"], mimeType: string | undefined): string {
+  const lowerMime = mimeType?.toLowerCase();
+  if (lowerMime?.includes("png")) return "png";
+  if (lowerMime?.includes("webp")) return "webp";
+  if (lowerMime?.includes("gif")) return "gif";
+  if (lowerMime?.includes("mp4")) return "mp4";
+  if (lowerMime?.includes("pdf")) return "pdf";
+  if (lowerMime?.includes("mpeg")) return "mp3";
+
+  switch (type) {
+    case "image":
+      return "jpg";
+    case "video":
+      return "mp4";
+    case "audio":
+      return "ogg";
+    case "sticker":
+      return "webp";
+    case "document":
+    default:
+      return "bin";
+  }
+}
+
 function ignoredMessageDetails(message: WAMessage, contentType: string, upsertType?: string): string {
   const content = normalizeMessageContent(message.message);
   const timestamp = timestampToMs(message.messageTimestamp);
@@ -488,6 +764,19 @@ function ignoredMessageDetails(message: WAMessage, contentType: string, upsertTy
   };
 
   return JSON.stringify(summary);
+}
+
+function extractSenderName(message: WAMessage): string | undefined {
+  const envelope = message as AnyRecord;
+  const name = textValue(envelope.pushName)?.trim();
+  if (!name || looksLikeWhatsAppJid(name)) {
+    return undefined;
+  }
+  return name;
+}
+
+function looksLikeWhatsAppJid(value: string): boolean {
+  return /@(?:s\.whatsapp\.net|lid|g\.us|newsletter)\b/.test(value);
 }
 
 function extractTemplateText(content: AnyRecord | undefined): string | undefined {
