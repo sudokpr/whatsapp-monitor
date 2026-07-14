@@ -28,6 +28,7 @@ import { appendFile, mkdir, stat as statFile, rename, readFile } from "node:fs/p
 import path from "node:path";
 import { StatsStore } from "./stats.js";
 import type { MetricSample } from "./metrics.js";
+import { WatchlistService } from "./watchlist.js";
 
 export interface StoredMessage {
   id: string;
@@ -85,6 +86,7 @@ export interface MediaGalleryItem {
 export class WhatsappMonitor {
   readonly stats = new StatsStore();
 
+  private readonly watchlist = new WatchlistService();
   private readonly messages: StoredMessage[] = [];
   private readonly groups = new Map<string, DiscoveredGroup>();
   private readonly groupMetadataCache = new Map<string, GroupMetadata>();
@@ -114,6 +116,11 @@ export class WhatsappMonitor {
       await this.loadPersistedMessages(2000);
     } catch (e) {
       console.warn('Could not load persisted messages at startup:', e);
+    }
+    try {
+      await this.watchlist.initialize();
+    } catch (e) {
+      console.warn('Could not initialize watchlist alerts:', e);
     }
 
     sock.ev.on("creds.update", saveCreds);
@@ -358,6 +365,7 @@ export class WhatsappMonitor {
         type: "gauge",
         value: this.messages.length,
       },
+      ...this.watchlist.samples(),
       ...storageMetrics,
     ];
 
@@ -551,6 +559,12 @@ export class WhatsappMonitor {
     }
 
     console.log(`Stored message ${storedMessage.id} from ${storedMessage.sender}.`);
+
+    try {
+      await this.watchlist.process(storedMessage);
+    } catch (error) {
+      console.warn(`Watchlist processing failed for message ${storedMessage.id}.`, error);
+    }
   }
 
   private incrementMessagesReceived(kind: string): void {

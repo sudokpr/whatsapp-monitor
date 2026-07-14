@@ -49,6 +49,41 @@ An empty `monitoredGroups` array means all group messages are processed.
 The config file is read when each incoming group message is handled, so changes
 apply without restarting the process.
 
+## Watchlist alerts
+
+Real-time product alerts are configured in `data/watchlist.json`. The file is
+hot-reloaded on incoming messages and is local runtime state, so keep group IDs
+and personal alert preferences there instead of in Git.
+
+Example:
+
+```json
+{
+  "watches": [
+    {
+      "id": "mtb-tyres-inner-tubes",
+      "enabled": true,
+      "groupIds": ["120363247915276526@g.us"],
+      "keywords": ["mtb tyre", "mtb tire", "inner tube", "29er tube"],
+      "excludeKeywords": ["sold"]
+    }
+  ]
+}
+```
+
+Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env` to send alerts.
+`TELEGRAM_TOPIC_ID` is optional and can be overridden per watch with
+`telegramTopicId`. Set `WATCHLIST_DRY_RUN=true` to log matched alerts without
+sending Telegram messages.
+
+Watchlist metrics are included in `GET /metrics`:
+
+- `whatsapp_watchlist_enabled_watches`
+- `whatsapp_watchlist_matches_total`
+- `whatsapp_watchlist_alerts_total`
+- `whatsapp_watchlist_alert_failures_total`
+- `whatsapp_watchlist_last_match_timestamp_seconds`
+
 ## Digest sidecar
 
 The active digest pipeline has been moved into this repo under
