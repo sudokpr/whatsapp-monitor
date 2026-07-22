@@ -7,9 +7,12 @@ import sys
 import os
 import sqlite3
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import defaultdict
 from pathlib import Path
+
+from input_guardrails import guard_message_text
 
 # Get config from environment. Keep defaults aligned with config.sh so direct
 # invocations read the live whatsapp-group-monitor persistence file.
@@ -24,7 +27,14 @@ newsletter_messages_per_group = int(os.environ.get('NEWSLETTER_MESSAGES_PER_GROU
 digest_message_char_limit = int(os.environ.get('DIGEST_MESSAGE_CHAR_LIMIT', 0))
 context_message_char_limit = int(os.environ.get('CONTEXT_MESSAGE_CHAR_LIMIT', 0))
 participants_api = os.environ.get('PARTICIPANTS_API') or 'http://localhost:3000/participants'
+media_link_base_url = (os.environ.get('WHATSAPP_MEDIA_BASE_URL') or 'http://localhost:3000').rstrip('/')
+media_link_token = os.environ.get('WHATSAPP_MEDIA_TOKEN') or ''
 state_key = os.environ.get('DIGEST_STATE_KEY', 'last_processed_ts')  # Allow per-LLM state keys
+excluded_group_ids = {
+    group_id.strip()
+    for group_id in re.split(r'[\s,]+', os.environ.get('DIGEST_EXCLUDED_GROUP_IDS', ''))
+    if group_id.strip()
+}
 
 # IST timezone
 ist_tz = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
@@ -60,6 +70,26 @@ def message_timestamp(message):
 def is_whatsapp_status(message):
     return message.get('groupId') == 'status@broadcast'
 
+def is_excluded_group(message):
+    return message.get('groupId') in excluded_group_ids
+
+def is_extractor_metadata_noise(message):
+    text = (message.get('text') or '').strip()
+    if not text:
+        return False
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return False
+
+    metadata_prefixes = ('groupId:', 'remoteJid:', 'id:', 'participant:', 'text:', 'url:')
+    if not all(line.startswith(metadata_prefixes) for line in lines):
+        return False
+
+    # These rows were produced by an overly broad extractor fallback from
+    # reactions/protocol/media metadata; they are not user-visible messages.
+    return any(line.startswith(('groupId:', 'remoteJid:', 'url:')) for line in lines)
+
 # Load messages
 all_msgs = []
 try:
@@ -70,6 +100,10 @@ try:
             try:
                 message = json.loads(line)
                 if is_whatsapp_status(message):
+                    continue
+                if is_excluded_group(message):
+                    continue
+                if is_extractor_metadata_noise(message):
                     continue
                 all_msgs.append(message)
             except json.JSONDecodeError as e:
@@ -110,7 +144,10 @@ def ts_to_time(ts):
         return '??'
 
 def extract_urls(text):
-    return re.findall(r'https?://[^\s<>"\'\)]+', text)
+    return [
+        url.rstrip('.,;:!?')
+        for url in re.findall(r'https?://[^\s<>"\'\)]+', text or '')
+    ]
 
 def link_summary(text):
     urls = extract_urls(text)
@@ -126,7 +163,18 @@ def link_summary(text):
     return ''
 
 def normalized_message_text(text):
-    return redact_phone_numbers((text or '').strip())
+    guarded, _ = guard_message_text(text)
+    return redact_phone_numbers(guarded)
+
+def message_has_suspected_prompt_injection(message):
+    _, flagged = guard_message_text(message.get('text', ''))
+    if flagged:
+        return True
+    reply = message.get('replyTo')
+    if isinstance(reply, dict):
+        _, flagged = guard_message_text(reply.get('text', ''))
+        return flagged
+    return False
 
 def counted_message_text(text, count):
     if count <= 1:
@@ -139,10 +187,54 @@ def counted_message_text(text, count):
         return f'Shared {count} map/location links'
     return text
 
+def media_link(message):
+    media = message.get('media')
+    if not isinstance(media, dict) or not media.get('mediaKey'):
+        return ''
+
+    group_id = urllib.parse.quote(str(message.get('groupId') or ''), safe='')
+    message_id = urllib.parse.quote(str(message.get('id') or ''), safe='')
+    if not group_id or not message_id:
+        return ''
+
+    url = f'{media_link_base_url}/media/{group_id}/{message_id}'
+    if media_link_token:
+        url = f'{url}?{urllib.parse.urlencode({"token": media_link_token})}'
+    return url
+
+def gallery_link(group_id, from_ts, to_ts):
+    params = {
+        'groupId': group_id,
+        'from': from_ts,
+        'to': to_ts,
+    }
+    if media_link_token:
+        params['token'] = media_link_token
+    return f'{media_link_base_url}/gallery?{urllib.parse.urlencode(params)}'
+
+def media_label(message):
+    media = message.get('media')
+    if not isinstance(media, dict):
+        return 'media'
+    media_type = str(media.get('type') or 'media')
+    if media_type == 'image':
+        return 'photo'
+    if media_type == 'document' and str(media.get('mimeType') or '').lower() == 'application/pdf':
+        return 'PDF'
+    return media_type
+
 def limit_text(text, limit):
     if limit <= 0 or len(text) <= limit:
         return text
     return f"{text[:limit].rstrip()} ... [truncated {len(text) - limit} chars]"
+
+def link_context_text(text, url):
+    context = normalized_message_text(text)
+    if url:
+        context = context.replace(url, ' ')
+    context = re.sub(r'https?://[^\s<>"\'\)]+', ' ', context)
+    context = re.sub(r'\s+', ' ', context).strip(' -:.,')
+    return context or link_summary(text) or 'Link shared'
 
 def redact_phone_numbers(text):
     """Remove phone-like identifiers before text is sent to any LLM."""
@@ -174,6 +266,42 @@ def redact_conversation_name(name):
     redacted = re.sub(r'DM:\s*(?:contact|\[phone\](?:@\w+)?)', 'DM:contact', redacted)
     return redacted
 
+def profile_name_label(message):
+    name = str(message.get('senderName') or '').strip()
+    if not name:
+        return ''
+    name = re.sub(r'\s+', ' ', name)
+    redacted = redact_phone_numbers(name)
+    if redacted in ('', 'contact', '[phone]') or redacted.startswith('@contact'):
+        return ''
+    return redacted
+
+def conversation_label(group_name, messages):
+    label = redact_conversation_name(group_name)
+    if label.startswith('DM:contact'):
+        for message in messages:
+            name = profile_name_label(message)
+            if name:
+                return f'DM:{name}'
+    return label
+
+def reply_context_text(message):
+    reply = message.get('replyTo')
+    if not isinstance(reply, dict) or not reply.get('id'):
+        return ''
+
+    text = normalized_message_text(reply.get('text') or '')
+    if text:
+        return f'reply to previous message: "{limit_text(text, 120)}"'
+    return 'reply to previous message'
+
+def digest_line_text(message):
+    text = normalized_message_text(message.get('text', ''))
+    reply_context = reply_context_text(message)
+    if not reply_context:
+        return text
+    return f'{reply_context} -> {text}' if text else reply_context
+
 def is_newsletter_group(group_name):
     name = (group_name or '').lower()
     return 'newsletter' in name or 'bulletin' in name
@@ -198,12 +326,22 @@ context_count = sum(
     len(limited_messages(msgs, context_messages_per_group, from_end=True))
     for msgs in context_by_group.values()
 )
+suspected_prompt_injection_count = sum(
+    1 for message in recent_msgs
+    if message_has_suspected_prompt_injection(message)
+)
+context_suspected_prompt_injection_count = sum(
+    1
+    for messages in context_by_group.values()
+    for message in limited_messages(messages, context_messages_per_group, from_end=True)
+    if message_has_suspected_prompt_injection(message)
+)
 
 ordered_groups = [grp for grp, _ in sorted(by_group.items(), key=lambda x: -len(x[1]))]
 label_counts = defaultdict(int)
 group_labels = {}
 for grp in ordered_groups:
-    label = redact_conversation_name(grp)
+    label = conversation_label(grp, by_group[grp])
     label_counts[label] += 1
     if label_counts[label] > 1 and label.startswith('DM:contact'):
         label = f"{label}-{label_counts[label]}"
@@ -216,6 +354,10 @@ if label_counts.get('DM:contact', 0) > 1:
 lines = []
 lines.append(f"📱 WHATSAPP DIGEST — since last run")
 lines.append(f"Showing msgs from {datetime.datetime.fromtimestamp(effective_start_ts/1000, ist_tz).strftime('%H:%M')} to {now.strftime('%H:%M')} IST | {len(recent_msgs)} msgs | {len(by_group)} groups\n")
+media_links = []
+gallery_links = []
+message_links = []
+seen_message_links = set()
 
 for grp in ordered_groups:
     msgs = by_group[grp]
@@ -224,7 +366,11 @@ for grp in ordered_groups:
     group_label = group_labels[grp]
     sender_labels = {}
 
-    def sender_label(sender):
+    def sender_label(message):
+        name = profile_name_label(message)
+        if name:
+            return name
+        sender = message.get('sender', '')
         if sender not in sender_labels:
             sender_labels[sender] = f"participant-{len(sender_labels) + 1}"
         return sender_labels[sender]
@@ -241,10 +387,10 @@ for grp in ordered_groups:
         context_end = datetime.datetime.fromtimestamp(effective_start_ts/1000, ist_tz).strftime('%H:%M')
         lines.append(f"   Context from previous window ({context_start}-{context_end}, not new):")
         for m in context_for_group:
-            text = normalized_message_text(m.get('text', ''))
+            text = digest_line_text(m)
             if not text:
                 continue
-            sender = sender_label(m.get('sender', ''))
+            sender = sender_label(m)
             time = ts_to_time(message_timestamp(m))
             lines.append(f"   [{time}] {sender}: {limit_text(text, context_message_char_limit)}")
         lines.append("   News updates:" if newsletter_group else "   New messages:")
@@ -259,17 +405,72 @@ for grp in ordered_groups:
     message_limit = newsletter_messages_per_group if newsletter_group else regular_messages_per_group
     display_entries = []
     for m in limited_messages(conversations, message_limit):
-        sender = sender_label(m.get('sender', ''))
+        sender = sender_label(m)
         time = ts_to_time(m['timestamp'])
-        text = normalized_message_text(m.get('text', ''))
+        text = digest_line_text(m)
         if display_entries and display_entries[-1]['text'] == text and text.startswith('Shared '):
             display_entries[-1]['count'] += 1
             continue
-        display_entries.append({'time': time, 'sender': sender, 'text': text, 'count': 1})
+        display_entries.append({'time': time, 'sender': sender, 'text': text, 'count': 1, 'message': m})
 
     for entry in display_entries:
         text = limit_text(counted_message_text(entry['text'], entry['count']), digest_message_char_limit)
+        link = media_link(entry.get('message', {}))
+        if link:
+            label = media_label(entry.get('message', {}))
+            text = f"{text} [{label}: {link}]"
         lines.append(f"   [{entry['time']}] {entry['sender']}: {text}")
+
+    for m in conversations:
+        link = media_link(m)
+        if not link:
+            continue
+        label = media_label(m)
+        text = limit_text(normalized_message_text(m.get('text', '')), 120)
+        media_links.append({
+            'group': group_label,
+            'time': ts_to_time(message_timestamp(m)),
+            'sender': sender_label(m),
+            'label': label,
+            'text': text,
+            'url': link,
+        })
+
+    for m in conversations:
+        for url in extract_urls(m.get('text', '')):
+            if url in seen_message_links:
+                continue
+            seen_message_links.add(url)
+            message_links.append({
+                'group': group_label,
+                'time': ts_to_time(message_timestamp(m)),
+                'sender': sender_label(m),
+                'context': limit_text(link_context_text(m.get('text', ''), url), 160),
+                'url': url,
+            })
+
+    gallery_media = [
+        m for m in conversations
+        if isinstance(m.get('media'), dict)
+        and (
+            m['media'].get('type') in ('image', 'video', 'sticker')
+            or (
+                m['media'].get('type') == 'document'
+                and str(m['media'].get('mimeType') or '').lower() == 'application/pdf'
+            )
+        )
+        and media_link(m)
+    ]
+    if gallery_media:
+        gallery_links.append({
+            'group': group_label,
+            'count': len(gallery_media),
+            'url': gallery_link(
+                gallery_media[0].get('groupId') or '',
+                effective_start_ts,
+                max(message_timestamp(m) for m in gallery_media),
+            ),
+        })
     
     links = []
     for m in msgs:
@@ -303,9 +504,14 @@ digest_metadata = {
     'message_count': len(recent_msgs),
     'group_count': len(by_group),
     'context_count': context_count,
+    'suspected_prompt_injection_count': suspected_prompt_injection_count,
+    'context_suspected_prompt_injection_count': context_suspected_prompt_injection_count,
     'context_window_hours': context_window_hours,
     'digest_message_char_limit': digest_message_char_limit,
     'context_message_char_limit': context_message_char_limit,
+    'media_links': media_links,
+    'gallery_links': gallery_links,
+    'message_links': message_links,
     'digest': output
 }
 

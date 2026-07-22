@@ -18,7 +18,16 @@ The API listens on port `3000` unless `PORT` is set:
 - `GET /health` returns `ok`
 - `GET /groups` returns discovered groups from the active connection
 - `GET /listings` returns the last 100 stored group messages
+- `GET /media/:groupId/:messageId` fetches stored message media on demand from
+  WhatsApp servers when the message has a persisted media descriptor. If
+  `WHATSAPP_MEDIA_TOKEN` is set, pass it as `?token=...` or `x-api-key`.
 - `GET /stats` returns daily message counts and top users/groups
+- `GET /metrics` returns Prometheus text metrics for monitor health, WhatsApp
+  connection state, message capture, persistence, local storage, and API
+  requests
+- `POST /send-message` sends a WhatsApp text message through the active
+  Baileys connection with JSON body `{ "jid": "...", "text": "..." }`.
+  If `WHATSAPP_SEND_TOKEN` is set, pass it as `x-api-key` or a bearer token.
 
 ## Group config
 
@@ -40,12 +49,46 @@ An empty `monitoredGroups` array means all group messages are processed.
 The config file is read when each incoming group message is handled, so changes
 apply without restarting the process.
 
+## Watchlist alerts
+
+Real-time product alerts are configured in `data/watchlist.json`. The file is
+hot-reloaded on incoming messages and is local runtime state, so keep group IDs
+and personal alert preferences there instead of in Git.
+
+Example:
+
+```json
+{
+  "watches": [
+    {
+      "id": "mtb-tyres-inner-tubes",
+      "enabled": true,
+      "groupIds": ["120363247915276526@g.us"],
+      "keywords": ["mtb tyre", "mtb tire", "inner tube", "29er tube"],
+      "excludeKeywords": ["sold"]
+    }
+  ]
+}
+```
+
+Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env` to send alerts.
+`TELEGRAM_TOPIC_ID` is optional and can be overridden per watch with
+`telegramTopicId`. Set `WATCHLIST_DRY_RUN=true` to log matched alerts without
+sending Telegram messages.
+
+Watchlist metrics are included in `GET /metrics`:
+
+- `whatsapp_watchlist_enabled_watches`
+- `whatsapp_watchlist_matches_total`
+- `whatsapp_watchlist_alerts_total`
+- `whatsapp_watchlist_alert_failures_total`
+- `whatsapp_watchlist_last_match_timestamp_seconds`
+
 ## Digest sidecar
 
 The active digest pipeline has been moved into this repo under
 `scripts/digest/`. It reads `data/messages.jsonl`, writes digest state and
-history to `data/digests.db`, and sends summaries through
-`scripts/telegram/send_telegram_topic.py`.
+history to `data/digests.db`, and stores configured model summaries.
 
 Python dependencies are managed with `uv` from `pyproject.toml`:
 
@@ -58,17 +101,121 @@ Local digest settings live in `.env` and are loaded by
 `scripts/digest/config.sh`. Use `.env.example` as the template for model
 selection and feature toggles.
 
-`npm run digest` runs the configured digest summarizers, sends Telegram
-notifications when configured, stores each model output, optionally sends a
-model comparison, and advances `digest_state` after a successful run.
-`npm run digest:preview` exercises the pipeline without Telegram sends or state
+Digest prompts are versioned with `DIGEST_PROMPT_VERSION`. The default `v2`
+produces a short, priority-based briefing with at most eight bullets. Set
+`DIGEST_PROMPT_VERSION=v1` in `.env` to restore the previous detailed,
+conversation-by-conversation format.
+
+`npm run digest` runs the configured digest summarizers, stores each model
+output, optionally sends a model comparison, and advances `digest_state` after a
+successful run. Telegram delivery is disabled by default; set
+`SEND_TELEGRAM=true` only when you want to mirror summaries there.
+WhatsApp delivery is available through the local monitor API; set
+`SEND_WHATSAPP=true` and `WHATSAPP_DIGEST_JID` to a contact, LID, or group JID
+when you want digest summaries sent on WhatsApp. For sending to the same
+account, the LID route may be required for readable delivery. If the monitor
+uses `WHATSAPP_SEND_TOKEN`, set the same value for the digest process. Outbound
+summaries start with the digest window and message/group counts.
+Set `DIGEST_EXCLUDED_GROUP_IDS` to a comma- or space-separated list of group
+JIDs to keep delivery/control groups out of future summaries.
+Captioned image/video/document/audio messages store only WhatsApp media
+metadata, not the media bytes. Digest deliveries include one time-bounded
+gallery link per conversation; when no gallery is available, a small digest can
+instead include individual media links. Opening either asks the running monitor
+to download and decrypt the media from WhatsApp if it is still available. Set
+`WHATSAPP_MEDIA_BASE_URL` to a URL reachable from where you read the digest, and
+set `WHATSAPP_MEDIA_TOKEN` if you want those links token-protected.
+The responsive gallery lazily streams photos and video ranges from WhatsApp and
+does not write media files to the Pi except for short-lived image-analysis temp
+files.
+`npm run digest:preview` exercises the pipeline without delivery sends or state
 advancement.
+
+### Image analysis
+
+The media gallery can analyse image and sticker quality in the background using
+classical Python image-processing code. The monitor downloads each queued image
+to `data/image-analysis/cache/`, runs `scripts/analyse_images.py --file ...`,
+then deletes the temp media file. Results are stored in SQLite at
+`data/image_analysis.db`; derived previews are stored under
+`data/image-analysis/previews/`.
+
+Install the Python dependencies before using the analyzer:
+
+```bash
+npm run py:sync
+```
+
+Opening a gallery page queues missing image analyses automatically. Existing
+successful rows are skipped unless forced. To queue old images from the command
+line while the monitor is running:
+
+```bash
+python scripts/analyse_images.py --group-id GROUP_ID
+python scripts/analyse_images.py --group-id GROUP_ID --force
+python scripts/analyse_images.py --media-id MEDIA_ID
+```
+
+If `WHATSAPP_MEDIA_TOKEN` is set, pass it through the environment or with
+`--token`. The same operation is available over HTTP:
+
+- `POST /api/image-analysis/run` with `{ "groupId": "...", "force": false }`
+- `GET /api/image-analysis?groupId=...`
+- `GET /api/image-analysis/:groupId/:messageId/preview/:kind` where `kind` is
+  `grayscale`, `edges`, `fourier`, or `histogram`
+
+Configurable thresholds:
+
+```bash
+IMAGE_ANALYSIS_CONCURRENCY=1
+IMAGE_ANALYSIS_MAX_DIMENSION=1024
+IMAGE_ANALYSIS_BLUR_BLURRY=80
+IMAGE_ANALYSIS_BLUR_SLIGHTLY_BLURRY=180
+IMAGE_ANALYSIS_DUPLICATE_HASH_DISTANCE=4
+IMAGE_ANALYSIS_SIMILAR_HASH_DISTANCE=6
+IMAGE_ANALYSIS_HEAVY_BLOCKINESS=9
+```
+
+The first version intentionally uses understandable signal-processing
+operations: grayscale intensity for brightness/contrast, variance of the
+Laplacian for blur, Canny edges for edge density, a high-pass residual for an
+approximate noise estimate, lightweight colour clustering, perceptual hashes,
+an approximate JPEG blockiness score, and a 2D FFT for educational frequency
+energy diagnostics. Noise, compression, and Fourier metrics are estimates, not
+definitive image-quality judgements.
+
+Example JSON output:
+
+```json
+{
+  "media_id": "3EB0...",
+  "group_id": "1203...@g.us",
+  "status": "success",
+  "width": 1600,
+  "height": 1200,
+  "brightness_mean": 141.6,
+  "brightness_label": "normal",
+  "contrast_stddev": 52.4,
+  "blur_score": 236.8,
+  "blur_label": "sharp",
+  "edge_density": 0.083,
+  "noise_score": 4.7,
+  "dominant_colors": [{ "rgb": [210, 204, 190], "percent": 0.32 }],
+  "similar_matches": [],
+  "compression_label": "normal",
+  "low_frequency_energy": 0.91,
+  "medium_frequency_energy": 0.08,
+  "high_frequency_energy": 0.01
+}
+```
 
 `npm run py:sync` uses `uv sync --prerelease allow` because the Codex Python
 client currently resolves through pre-release packages.
 
 Ollama digest generation is optional and disabled by default. Set
 `ENABLE_OLLAMA=true`, `OLLAMA_URL`, and `OLLAMA_MODEL` in `.env` to enable it.
+For Ollama Cloud, use `OLLAMA_URL=https://ollama.com` and set
+`OLLAMA_API_KEY`.
 Set `ENABLE_MODEL_COMPARISON=false` to skip the comparison summary.
 
 DSPy prompt generation is configured in `scripts/digest/config.sh`. By default
@@ -81,3 +228,136 @@ Example cron entry:
 ```cron
 0 6,10,14,18,22 * * * cd /path/to/whatsapp-group-monitor && scripts/digest/combined_6hr_digest.sh >> data/summary.log 2>&1
 ```
+
+### Prometheus metrics
+
+The monitor exposes scrape metrics at `GET /metrics`.
+
+Storage metrics are emitted by the monitor process:
+
+- `whatsapp_storage_data_dir_bytes`
+- `whatsapp_storage_messages_jsonl_bytes`
+- `whatsapp_storage_archive_bytes`
+- `whatsapp_storage_archive_files`
+- `whatsapp_storage_free_bytes`
+- `whatsapp_storage_total_bytes`
+
+Image analysis metrics are emitted by the monitor process when the gallery
+analyzer is enabled:
+
+- `whatsapp_image_analysis_queue_depth`
+- `whatsapp_image_analysis_running`
+- `whatsapp_image_analysis_concurrency`
+- `whatsapp_image_analysis_enqueued_total`
+- `whatsapp_image_analysis_skipped_existing_total`
+- `whatsapp_image_analysis_runs_total{status="success|error"}`
+- `whatsapp_image_analysis_duration_seconds_bucket`
+- `whatsapp_image_analysis_duration_seconds_sum`
+- `whatsapp_image_analysis_duration_seconds_count`
+- `whatsapp_image_analysis_last_duration_seconds`
+- `whatsapp_image_analysis_last_run_timestamp_seconds`
+- `whatsapp_image_analysis_last_success_timestamp_seconds`
+- `whatsapp_image_analysis_last_failure_timestamp_seconds`
+- `whatsapp_image_analysis_records{status="success|error|processing"}`
+- `whatsapp_image_analysis_signal_records{signal="blurry|dark|duplicates|compressed|screenshots"}`
+
+Average image analysis latency can be queried with
+`rate(whatsapp_image_analysis_duration_seconds_sum[5m]) / rate(whatsapp_image_analysis_duration_seconds_count[5m])`.
+P99 image analysis latency can be queried with
+`histogram_quantile(0.99, rate(whatsapp_image_analysis_duration_seconds_bucket[5m]))`.
+
+### Connection remediator
+
+`scripts/remediate_whatsapp_connection.sh` can run as a systemd user timer to
+handle the common case where the monitor process is healthy but the Baileys
+WhatsApp socket is stuck down.
+
+Install and start the timer:
+
+```bash
+make remediator-install
+```
+
+Useful operations:
+
+```bash
+make remediator-status
+make remediator-run
+make remediator-logs
+```
+
+The remediator only restarts `whatsapp-group-monitor.service` when
+`whatsapp_monitor_up` is `1` and `whatsapp_connection_up` is `0` for repeated
+checks. By default it checks once per minute, requires 2 consecutive failures,
+allows one restart every 15 minutes, and caps restarts at 12 per day. State is
+stored under `data/remediation/`, and logs go to `data/remediator.log`.
+When it actually restarts the service, it sends one Telegram notification using
+`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, and optional `TELEGRAM_TOPIC_ID` from
+`.env`. Set `TELEGRAM_REMEDIATOR_NOTIFY=false` to disable these operational
+restart notifications. Telegram restart messages include a high-frequency
+warning once `HIGH_RESTART_NOTIFY_THRESHOLD` is reached; the default threshold
+is 5 restarts in the same day. Healthy checks, cooldown skips, and
+observation-only checks do not send Telegram messages.
+
+It deliberately does not remediate unrelated alerts such as disk usage,
+storage exhaustion, missing metrics, or auth/session failures that still need
+manual QR login.
+
+The digest cron job can also emit one Prometheus text snapshot per run:
+
+```bash
+PROMETHEUS_METRICS_ENABLED=true
+PROMETHEUS_METRICS_FILE=data/metrics/whatsapp_digest.prom
+PROMETHEUS_METRICS_PUSH_URL=
+PROMETHEUS_METRICS_USERNAME=
+PROMETHEUS_METRICS_PASSWORD=
+```
+
+`PROMETHEUS_METRICS_PUSH_URL` posts the text exposition payload to a compatible
+ingestion endpoint, such as a Pushgateway grouping URL or a text import endpoint.
+Strict Prometheus remote-write endpoints require protobuf/snappy encoding; point
+those through an agent or gateway that accepts text exposition.
+
+Digest run metrics:
+
+- `whatsapp_digest_last_run_timestamp_seconds`
+- `whatsapp_digest_last_success_timestamp_seconds`
+- `whatsapp_digest_last_failure_timestamp_seconds`
+- `whatsapp_digest_last_duration_seconds`
+- `whatsapp_digest_last_message_count`
+- `whatsapp_digest_last_group_count`
+- `whatsapp_digest_last_suspected_prompt_injection_count`
+- `whatsapp_digest_last_context_suspected_prompt_injection_count`
+- `whatsapp_digest_last_sent_to_telegram`
+- `whatsapp_digest_telegram_enabled`
+- `whatsapp_digest_last_sent_to_whatsapp`
+- `whatsapp_digest_whatsapp_enabled`
+- `whatsapp_digest_state_last_processed_timestamp_seconds`
+- `whatsapp_digest_last_message_timestamp_seconds`
+
+Digest LLM request metrics are labeled by `provider`, `model`, `phase`,
+`status`, and `source`:
+
+- `whatsapp_digest_llm_last_request_duration_seconds`
+- `whatsapp_digest_llm_last_prompt_tokens`
+- `whatsapp_digest_llm_last_completion_tokens`
+- `whatsapp_digest_llm_last_total_tokens`
+- `whatsapp_digest_llm_last_prompt_chars`
+- `whatsapp_digest_llm_last_completion_chars`
+
+The daily DietPi backup job can emit a Prometheus text snapshot and push it to
+a Pushgateway-compatible endpoint:
+
+```bash
+BACKUP_PROMETHEUS_METRICS_ENABLED=true
+BACKUP_PROMETHEUS_METRICS_FILE=data/metrics/whatsapp_backup.prom
+BACKUP_PROMETHEUS_METRICS_PUSH_URL=http://prometheus-pushgateway:9091/metrics/job/whatsapp_backup
+```
+
+Backup run metrics:
+
+- `whatsapp_backup_last_run_timestamp_seconds`
+- `whatsapp_backup_last_success_timestamp_seconds`
+- `whatsapp_backup_last_failure_timestamp_seconds`
+- `whatsapp_backup_last_duration_seconds`
+- `whatsapp_backup_last_exit_code`

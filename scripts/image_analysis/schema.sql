@@ -1,0 +1,51 @@
+CREATE TABLE IF NOT EXISTS image_analysis (
+  media_id TEXT NOT NULL,
+  group_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  error_message TEXT,
+  algorithm_version TEXT NOT NULL,
+  processing_time_ms INTEGER NOT NULL DEFAULT 0,
+  width INTEGER,
+  height INTEGER,
+  aspect_ratio REAL,
+  file_format TEXT,
+  file_size_bytes INTEGER,
+  color_mode TEXT,
+  exif_date TEXT,
+  brightness_mean REAL,
+  brightness_label TEXT,
+  contrast_stddev REAL,
+  contrast_label TEXT,
+  blur_score REAL,
+  blur_label TEXT,
+  edge_density REAL,
+  noise_score REAL,
+  average_rgb_json TEXT,
+  dominant_colors_json TEXT,
+  color_histogram_json TEXT,
+  phash TEXT,
+  dhash TEXT,
+  average_hash TEXT,
+  exact_duplicate_of TEXT,
+  similar_matches_json TEXT,
+  blockiness_score REAL,
+  compression_label TEXT,
+  low_frequency_energy REAL,
+  medium_frequency_energy REAL,
+  high_frequency_energy REAL,
+  is_screenshot INTEGER NOT NULL DEFAULT 0,
+  preview_grayscale_path TEXT,
+  preview_edges_path TEXT,
+  preview_fourier_path TEXT,
+  preview_histogram_path TEXT,
+  thresholds_json TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (group_id, media_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_image_analysis_group_status
+  ON image_analysis(group_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_image_analysis_hashes
+  ON image_analysis(phash, dhash, average_hash);

@@ -4,10 +4,18 @@ import json
 import os
 import sys
 import time
+import urllib.error
 import urllib.request
 
 CONFIG = os.environ.get("TELEGRAM_CONFIG")
 MAX_LEN = int(os.environ.get("TELEGRAM_MAX_LEN", "3800"))
+TIMEOUT_SECONDS = int(os.environ.get("TELEGRAM_TIMEOUT_SECONDS", "30"))
+ASSUME_SENT_ON_TIMEOUT = os.environ.get("TELEGRAM_ASSUME_SENT_ON_TIMEOUT", "true").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 def token():
@@ -65,7 +73,7 @@ def send(part):
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=30) as response:
+    with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as response:
         return json.loads(response.read())
 
 
@@ -77,13 +85,29 @@ def send_text(text, dry_run=None):
         destination = os.environ.get("TELEGRAM_TOPIC_ID") or os.environ.get("TELEGRAM_CHAT_ID") or "configured chat"
         return f"DRY_RUN: would send {len(parts)} Telegram message(s) to {destination}, {len(text)} chars total"
 
+    assumed_timeouts = 0
     for index, part in enumerate(parts):
         if len(parts) > 1:
             part = f"({index + 1}/{len(parts)})\n" + part
-        result = send(part)
+        try:
+            result = send(part)
+        except TimeoutError:
+            if not ASSUME_SENT_ON_TIMEOUT:
+                raise
+            assumed_timeouts += 1
+            time.sleep(0.8)
+            continue
+        except urllib.error.URLError as exc:
+            if not (ASSUME_SENT_ON_TIMEOUT and isinstance(exc.reason, TimeoutError)):
+                raise
+            assumed_timeouts += 1
+            time.sleep(0.8)
+            continue
         if not result.get("ok"):
             raise RuntimeError(f"Telegram send failed: {result.get('description', 'Unknown error')}")
         time.sleep(0.8)
+    if assumed_timeouts:
+        return f"sent {len(parts)} Telegram message(s); assumed delivered after {assumed_timeouts} timeout(s)"
     return f"sent {len(parts)} Telegram message(s)"
 
 

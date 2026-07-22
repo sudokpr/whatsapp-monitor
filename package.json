@@ -9,7 +9,7 @@
     "start": "node dist/index.js",
     "py:sync": "unset VIRTUAL_ENV; uv sync --prerelease allow",
     "digest": "scripts/digest/combined_6hr_digest.sh",
-    "digest:preview": "DIGEST_PROCESSING_MODE=preview SEND_TELEGRAM=false scripts/digest/combined_6hr_digest.sh"
+    "digest:preview": "DIGEST_PROCESSING_MODE=preview SEND_TELEGRAM=false SEND_WHATSAPP=false scripts/digest/combined_6hr_digest.sh"
   },
   "dependencies": {
     "@hapi/boom": "^10.0.1",

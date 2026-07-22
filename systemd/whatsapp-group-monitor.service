@@ -1,0 +1,18 @@
+[Unit]
+Description=WhatsApp group monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__WORKING_DIRECTORY__
+Environment=NODE_ENV=development
+Environment=PATH=__PATH__
+ExecStart=__NPM__ run dev
+Restart=always
+RestartSec=10
+StandardOutput=append:__LOG_FILE__
+StandardError=append:__LOG_FILE__
+
+[Install]
+WantedBy=default.target
