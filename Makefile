@@ -7,8 +7,11 @@ SERVICE_TEMPLATE ?= systemd/$(SERVICE)
 SERVICE_UNIT ?= $(SYSTEMD_USER_DIR)/$(SERVICE)
 NPM_BIN ?= $(shell command -v npm)
 SERVICE_PATH ?= $(PATH)
+REMEDIATOR_SERVICE ?= whatsapp-group-monitor-remediator.service
+REMEDIATOR_TIMER ?= whatsapp-group-monitor-remediator.timer
+REMEDIATOR_LOG ?= data/remediator.log
 
-.PHONY: help install dev build start py-sync digest digest-preview health service-install service-status service-restart service-stop qr-login logs logs-follow digest-logs digest-logs-follow status backup-run backup-timers backup-status backup-logs backup-logs-follow
+.PHONY: help install dev build start py-sync digest digest-preview health service-install service-status service-restart service-stop qr-login logs logs-follow remediator-install remediator-run remediator-status remediator-logs remediator-logs-follow digest-logs digest-logs-follow status backup-run backup-timers backup-status backup-logs backup-logs-follow
 
 help:
 	@printf '%s\n' \
@@ -29,6 +32,11 @@ help:
 		'  qr-login            Stop service, reset auth, and run dev to print login QR' \
 		'  logs                Show recent monitor service logs' \
 		'  logs-follow         Follow monitor service logs' \
+		'  remediator-install  Install/start the WhatsApp connection remediator timer' \
+		'  remediator-run      Run the WhatsApp connection remediator once now' \
+		'  remediator-status   Show the remediator service/timer status' \
+		'  remediator-logs     Show recent remediator log lines' \
+		'  remediator-logs-follow Follow remediator log' \
 		'  digest-logs         Show recent digest cron log lines' \
 		'  digest-logs-follow  Follow digest cron log' \
 		'  backup-run          Run the DietPi backup now' \
@@ -101,6 +109,31 @@ logs:
 
 logs-follow:
 	tail -f $(MONITOR_LOG)
+
+remediator-install:
+	mkdir -p $(dir $(REMEDIATOR_LOG))
+	mkdir -p $(SYSTEMD_USER_DIR)
+	chmod +x scripts/remediate_whatsapp_connection.sh
+	sed \
+		-e 's#__WORKING_DIRECTORY__#$(CURDIR)#g' \
+		-e 's#__PATH__#$(SERVICE_PATH)#g' \
+		-e 's#__LOG_FILE__#$(CURDIR)/$(REMEDIATOR_LOG)#g' \
+		systemd/$(REMEDIATOR_SERVICE) > $(SYSTEMD_USER_DIR)/$(REMEDIATOR_SERVICE)
+	cp systemd/$(REMEDIATOR_TIMER) $(SYSTEMD_USER_DIR)/$(REMEDIATOR_TIMER)
+	systemctl --user daemon-reload
+	systemctl --user enable --now $(REMEDIATOR_TIMER)
+
+remediator-run:
+	systemctl --user start $(REMEDIATOR_SERVICE)
+
+remediator-status:
+	systemctl --user status $(REMEDIATOR_TIMER) $(REMEDIATOR_SERVICE) --no-pager || true
+
+remediator-logs:
+	tail -n $(LOG_LINES) $(REMEDIATOR_LOG)
+
+remediator-logs-follow:
+	tail -f $(REMEDIATOR_LOG)
 
 digest-logs:
 	tail -n $(LOG_LINES) data/summary.log

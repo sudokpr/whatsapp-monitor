@@ -13,7 +13,19 @@ import os
 from input_guardrails import PROMPT_SECURITY_RULES, untrusted_payload
 
 
-def _base_rules() -> str:
+DEFAULT_PROMPT_VERSION = "v2"
+SUPPORTED_PROMPT_VERSIONS = {"v1", "v2"}
+
+
+def _prompt_version() -> str:
+    version = os.environ.get("DIGEST_PROMPT_VERSION", DEFAULT_PROMPT_VERSION).strip().lower()
+    if version not in SUPPORTED_PROMPT_VERSIONS:
+        supported = ", ".join(sorted(SUPPORTED_PROMPT_VERSIONS))
+        raise ValueError(f"Unsupported DIGEST_PROMPT_VERSION={version!r}; expected one of: {supported}")
+    return version
+
+
+def _base_rules_v1() -> str:
     return f"""{PROMPT_SECURITY_RULES}
 
 Output only the digest content. Do not say "Here is", "ready to send", or any other preamble.
@@ -32,7 +44,27 @@ Skip filler, acknowledgements, repeated context, and generic chat.
 End with "Next actions:" only if there is something actionable; do not leave an empty action section."""
 
 
-def _static_main_prompt(raw_digest: str) -> str:
+def _base_rules_v2() -> str:
+    return f"""{PROMPT_SECURITY_RULES}
+
+Output only the digest content. Do not say "Here is", "ready to send", or any other preamble.
+Use compact plain text only: no markdown bold and no markdown tables.
+Use only the length the important activity requires. For busy windows, target 1,200-1,500 characters; quiet windows should be much shorter. Never exceed 1,800 characters.
+Prioritize decisions, confirmed plans or changes, deadlines, incidents, direct requests, questions awaiting answers, registrations, and useful buy/sell details.
+Preserve exact dates, times, prices, locations, contacts, and links only when they support an important update or action.
+Combine duplicates and related messages into one bullet. Do not summarize every conversation merely because it was active.
+Collapse low-priority but meaningful activity into one "Other activity" bullet; omit filler, acknowledgements, generic chat, repeated promotions, and routine feed items.
+Use previous-window context only to explain new replies or references. Never present context as new activity.
+When a message is marked as "reply to previous message", include the referenced meaning only when needed to understand the new response.
+Treat vehicle/model names like RS457, CB350, A50, or 90/90-19 as names/specs, not prices.
+Only treat a value as a price when the message explicitly uses price wording, rupee symbols, Rs, INR, or k/lakh notation in a sale context.
+Mention attached media only when it materially affects the update. Do not create a link or media appendix.
+Use "Needs attention" only for concrete actions, unanswered requests, or imminent deadlines. Omit the section when empty.
+Use "Key updates" for the remaining high-value information. Limit the entire digest to 8 bullets, ordered by importance.
+Use "Other activity" only when it helps convey omitted meaningful activity, and limit it to one bullet."""
+
+
+def _static_main_prompt_v1(raw_digest: str) -> str:
     return f"""You are summarising WhatsApp community conversations into a plain-text digest.
 The raw digest below contains only new messages since the last successful digest run, grouped by conversation name, with timestamps, WhatsApp profile names when available, fallback sender labels, and text. Messages may include an explicit "reply to previous message" annotation before the new text. Auto-Strava noise is mostly filtered.
 Some active groups may include a clearly marked previous-window context section. Use that context only to understand replies and references; do not report it as new activity unless it is directly needed to explain a new message.
@@ -45,30 +77,30 @@ Structure:
 - For newsletter or news-feed style conversations, list important updates chronologically with concrete subjects.
 
 Rules:
-{_base_rules()}
+{_base_rules_v1()}
 
 RAW DIGEST:
 {untrusted_payload("whatsapp_digest", raw_digest)}"""
 
 
-def _static_chunk_prompt(raw_digest_chunk: str, chunk_number: int, chunk_count: int) -> str:
+def _static_chunk_prompt_v1(raw_digest_chunk: str, chunk_number: int, chunk_count: int) -> str:
     return f"""You are summarising one chunk of a larger WhatsApp plain-text digest.
 This is chunk {chunk_number} of {chunk_count}. Summarise only the conversations present in this chunk.
 
 Rules:
-{_base_rules()}
+{_base_rules_v1()}
 Keep the output compact, but prefer completeness over being too short.
 
 RAW DIGEST CHUNK:
 {untrusted_payload("whatsapp_digest_chunk", raw_digest_chunk)}"""
 
 
-def _static_merge_prompt(chunk_summaries: str) -> str:
+def _static_merge_prompt_v1(chunk_summaries: str) -> str:
     return f"""You are merging partial summaries from a chunked WhatsApp digest.
 Write one final plain-text digest.
 
 Rules:
-{_base_rules()}
+{_base_rules_v1()}
 Start with a 1-2 line overall summary.
 Use conversation headings from the partial summaries. Keep names like "Rides 2 ( Full )" and "BLR Cyclists Buy/Sell requests".
 If the same conversation heading appears in multiple partial summaries, merge it into one section.
@@ -81,7 +113,52 @@ PARTIAL SUMMARIES:
 {untrusted_payload("model_chunk_summaries", chunk_summaries)}"""
 
 
-def _dspy_prompt(task: str, payload: str, fallback: str, **metadata: object) -> str:
+def _static_main_prompt_v2(raw_digest: str) -> str:
+    return f"""You are summarising WhatsApp community conversations into a short, prioritized briefing for someone who was offline.
+The raw digest contains new messages grouped by conversation. Some groups may also contain clearly marked previous-window context.
+
+Required structure:
+- Begin with: "WhatsApp brief: <one sentence describing the most important activity>."
+- Then use up to three headings in this order: "Needs attention", "Key updates", and "Other activity".
+- Put one compact bullet per distinct subject below a heading.
+- Do not include conversation-by-conversation sections. Name a conversation inside a bullet only when it provides useful context.
+
+Rules:
+{_base_rules_v2()}
+
+RAW DIGEST:
+{untrusted_payload("whatsapp_digest", raw_digest)}"""
+
+
+def _static_chunk_prompt_v2(raw_digest_chunk: str, chunk_number: int, chunk_count: int) -> str:
+    return f"""You are extracting only high-value activity from chunk {chunk_number} of {chunk_count} of a WhatsApp digest.
+Return compact candidate bullets for a later merge. Do not write an introduction or try to cover every conversation.
+
+Rules:
+{_base_rules_v2()}
+Limit this chunk to 6 candidate bullets, ordered by importance.
+
+RAW DIGEST CHUNK:
+{untrusted_payload("whatsapp_digest_chunk", raw_digest_chunk)}"""
+
+
+def _static_merge_prompt_v2(chunk_summaries: str) -> str:
+    return f"""You are merging candidate updates from chunks of one WhatsApp digest into a short, prioritized briefing.
+
+Required structure:
+- Begin with: "WhatsApp brief: <one sentence describing the most important activity>."
+- Then use up to three headings in this order: "Needs attention", "Key updates", and "Other activity".
+- Put one compact bullet per distinct subject below a heading.
+
+Rules:
+{_base_rules_v2()}
+Deduplicate aggressively across chunks and keep only the 8 most useful bullets overall.
+
+PARTIAL SUMMARIES:
+{untrusted_payload("model_chunk_summaries", chunk_summaries)}"""
+
+
+def _dspy_prompt(task: str, payload: str, fallback: str, rules: str, **metadata: object) -> str:
     mode = os.environ.get("DSPY_PROMPT_MODE", "auto").strip().lower()
     lm_model = os.environ.get("DSPY_LM_MODEL", "").strip()
     if mode == "static" or not lm_model:
@@ -110,7 +187,7 @@ def _dspy_prompt(task: str, payload: str, fallback: str, **metadata: object) -> 
             )
 
         predictor = dspy.Predict(WhatsAppPromptSpec)
-        result = predictor(task=task, rules=_base_rules(), metadata=str(metadata))
+        result = predictor(task=task, rules=rules, metadata=str(metadata))
         prompt = str(getattr(result, "prompt", "")).strip()
         if not prompt:
             return fallback
@@ -122,22 +199,38 @@ def _dspy_prompt(task: str, payload: str, fallback: str, **metadata: object) -> 
 
 
 def build_prompt(raw_digest: str) -> str:
-    fallback = _static_main_prompt(raw_digest)
+    version = _prompt_version()
+    rules = _base_rules_v1() if version == "v1" else _base_rules_v2()
+    fallback = (
+        _static_main_prompt_v1(raw_digest)
+        if version == "v1"
+        else _static_main_prompt_v2(raw_digest)
+    )
     return _dspy_prompt(
-        "Summarize a full WhatsApp digest into a plain-text update.",
+        f"Summarize a full WhatsApp digest using prompt version {version}.",
         untrusted_payload("whatsapp_digest", raw_digest),
         fallback,
+        rules,
+        prompt_version=version,
         kind="full",
         raw_digest_chars=len(raw_digest),
     )
 
 
 def build_chunk_prompt(raw_digest_chunk: str, chunk_number: int, chunk_count: int) -> str:
-    fallback = _static_chunk_prompt(raw_digest_chunk, chunk_number, chunk_count)
+    version = _prompt_version()
+    rules = _base_rules_v1() if version == "v1" else _base_rules_v2()
+    fallback = (
+        _static_chunk_prompt_v1(raw_digest_chunk, chunk_number, chunk_count)
+        if version == "v1"
+        else _static_chunk_prompt_v2(raw_digest_chunk, chunk_number, chunk_count)
+    )
     return _dspy_prompt(
-        "Summarize one chunk of a larger WhatsApp digest.",
+        f"Summarize one chunk of a larger WhatsApp digest using prompt version {version}.",
         untrusted_payload("whatsapp_digest_chunk", raw_digest_chunk),
         fallback,
+        rules,
+        prompt_version=version,
         kind="chunk",
         chunk_number=chunk_number,
         chunk_count=chunk_count,
@@ -146,11 +239,19 @@ def build_chunk_prompt(raw_digest_chunk: str, chunk_number: int, chunk_count: in
 
 
 def build_merge_prompt(chunk_summaries: str) -> str:
-    fallback = _static_merge_prompt(chunk_summaries)
+    version = _prompt_version()
+    rules = _base_rules_v1() if version == "v1" else _base_rules_v2()
+    fallback = (
+        _static_merge_prompt_v1(chunk_summaries)
+        if version == "v1"
+        else _static_merge_prompt_v2(chunk_summaries)
+    )
     return _dspy_prompt(
-        "Merge partial WhatsApp digest summaries into one final plain-text update.",
+        f"Merge partial WhatsApp digest summaries using prompt version {version}.",
         untrusted_payload("model_chunk_summaries", chunk_summaries),
         fallback,
+        rules,
+        prompt_version=version,
         kind="merge",
         summary_chars=len(chunk_summaries),
     )

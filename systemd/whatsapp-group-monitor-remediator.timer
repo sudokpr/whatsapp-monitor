@@ -1,0 +1,12 @@
+[Unit]
+Description=Check WhatsApp group monitor connection health
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=15s
+Persistent=true
+Unit=whatsapp-group-monitor-remediator.service
+
+[Install]
+WantedBy=timers.target

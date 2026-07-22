@@ -1,0 +1,12 @@
+[Unit]
+Description=Remediate WhatsApp group monitor connection failures
+After=network-online.target whatsapp-group-monitor.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=__WORKING_DIRECTORY__
+Environment=PATH=__PATH__
+ExecStart=__WORKING_DIRECTORY__/scripts/remediate_whatsapp_connection.sh
+StandardOutput=append:__LOG_FILE__
+StandardError=append:__LOG_FILE__

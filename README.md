@@ -101,6 +101,11 @@ Local digest settings live in `.env` and are loaded by
 `scripts/digest/config.sh`. Use `.env.example` as the template for model
 selection and feature toggles.
 
+Digest prompts are versioned with `DIGEST_PROMPT_VERSION`. The default `v2`
+produces a short, priority-based briefing with at most eight bullets. Set
+`DIGEST_PROMPT_VERSION=v1` in `.env` to restore the previous detailed,
+conversation-by-conversation format.
+
 `npm run digest` runs the configured digest summarizers, stores each model
 output, optionally sends a model comparison, and advances `digest_state` after a
 successful run. Telegram delivery is disabled by default; set
@@ -260,6 +265,43 @@ Average image analysis latency can be queried with
 `rate(whatsapp_image_analysis_duration_seconds_sum[5m]) / rate(whatsapp_image_analysis_duration_seconds_count[5m])`.
 P99 image analysis latency can be queried with
 `histogram_quantile(0.99, rate(whatsapp_image_analysis_duration_seconds_bucket[5m]))`.
+
+### Connection remediator
+
+`scripts/remediate_whatsapp_connection.sh` can run as a systemd user timer to
+handle the common case where the monitor process is healthy but the Baileys
+WhatsApp socket is stuck down.
+
+Install and start the timer:
+
+```bash
+make remediator-install
+```
+
+Useful operations:
+
+```bash
+make remediator-status
+make remediator-run
+make remediator-logs
+```
+
+The remediator only restarts `whatsapp-group-monitor.service` when
+`whatsapp_monitor_up` is `1` and `whatsapp_connection_up` is `0` for repeated
+checks. By default it checks once per minute, requires 2 consecutive failures,
+allows one restart every 15 minutes, and caps restarts at 12 per day. State is
+stored under `data/remediation/`, and logs go to `data/remediator.log`.
+When it actually restarts the service, it sends one Telegram notification using
+`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, and optional `TELEGRAM_TOPIC_ID` from
+`.env`. Set `TELEGRAM_REMEDIATOR_NOTIFY=false` to disable these operational
+restart notifications. Telegram restart messages include a high-frequency
+warning once `HIGH_RESTART_NOTIFY_THRESHOLD` is reached; the default threshold
+is 5 restarts in the same day. Healthy checks, cooldown skips, and
+observation-only checks do not send Telegram messages.
+
+It deliberately does not remediate unrelated alerts such as disk usage,
+storage exhaustion, missing metrics, or auth/session failures that still need
+manual QR login.
 
 The digest cron job can also emit one Prometheus text snapshot per run:
 
