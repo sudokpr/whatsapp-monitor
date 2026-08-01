@@ -35,6 +35,7 @@ export function renderGallery(items: MediaGalleryItem[], mediaToken: string | un
     .meta { position:absolute; left:0; right:0; bottom:0; display:flex; justify-content:space-between; align-items:end; gap:8px; padding:8px 9px; color:#fff; background:rgba(0,0,0,.72); font-size:12px; }
     .kind { padding:3px 6px; border-radius:4px; background:var(--accent); font-weight:700; text-transform:uppercase; }
     .kind.video { background:var(--video); }
+    .sender { min-width:0; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; }
     .analysis-badges { position:absolute; left:6px; right:6px; top:6px; display:flex; flex-wrap:wrap; gap:4px; z-index:1; }
     .analysis-badges span { max-width:100%; padding:3px 5px; border-radius:4px; background:rgba(8,127,91,.9); color:#fff; font-size:11px; font-weight:700; line-height:1.1; overflow:hidden; text-overflow:ellipsis; }
     .analysis-badges .warn { background:rgba(181,71,53,.94); }
@@ -43,14 +44,16 @@ export function renderGallery(items: MediaGalleryItem[], mediaToken: string | un
     .empty { color:var(--muted); padding:48px 0; text-align:center; }
     dialog { width:100vw; height:100dvh; max-width:none; max-height:none; margin:0; padding:0; border:0; background:#0c0e0d; color:#fff; }
     dialog::backdrop { background:#0c0e0d; }
-    .viewer { height:100%; display:grid; grid-template-rows:auto minmax(0,1fr) auto; }
+    .viewer { width:100%; height:100%; min-width:0; display:grid; grid-template-columns:minmax(0,1fr); grid-template-rows:auto minmax(0,1fr) auto; overflow:hidden; }
+    .viewer-content { min-width:0; min-height:0; display:grid; grid-template-columns:minmax(0,1fr); grid-template-rows:auto minmax(0,1fr); overflow:hidden; }
     .viewer-bar { display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:56px; padding:8px 14px; border-bottom:1px solid #303532; }
     .viewer-actions { display:flex; gap:8px; }
     .viewer-title { min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:14px; }
     .close, .nav { border:1px solid #59615d; background:#202522; color:#fff; border-radius:6px; min-height:38px; padding:0 14px; font:inherit; cursor:pointer; }
     .nav:disabled { opacity:.38; cursor:default; }
-    .stage { min-height:0; display:grid; place-items:center; overflow:hidden; }
-    .stage img, .stage video, .stage iframe { display:block; width:100%; height:100%; min-width:0; min-height:0; border:0; object-fit:contain; }
+    .stage { width:100%; height:100%; min-width:0; min-height:0; display:grid; place-items:center; overflow:hidden; }
+    .stage img, .stage video { display:block; width:auto; height:auto; max-width:100%; max-height:100%; min-width:0; min-height:0; border:0; object-fit:contain; }
+    .stage iframe { display:block; width:100%; height:100%; min-width:0; min-height:0; border:0; }
     .caption { max-height:34vh; overflow:auto; margin:0; padding:10px 16px calc(12px + env(safe-area-inset-bottom)); color:#d8ddda; border-top:1px solid #303532; font-size:14px; white-space:pre-wrap; }
     .preview-tabs { display:flex; flex-wrap:wrap; gap:6px; padding:8px 14px; border-bottom:1px solid #303532; }
     .preview-tabs button { min-height:32px; border:1px solid #59615d; background:#202522; color:#fff; border-radius:6px; padding:0 10px; font:inherit; cursor:pointer; font-size:13px; }
@@ -68,7 +71,7 @@ export function renderGallery(items: MediaGalleryItem[], mediaToken: string | un
 <body>
   <header><div class="header-inner"><div><h1>${escapeHtml(groupName)}</h1><p class="count" id="count"></p></div><div class="controls"><div class="filters" aria-label="Gallery filters"><button data-filter="all" aria-pressed="true">All</button><button data-filter="image" aria-pressed="false">Photos</button><button data-filter="video" aria-pressed="false">Videos</button><button data-filter="document" aria-pressed="false">PDFs</button><button data-filter="blurry" aria-pressed="false">Blurry</button><button data-filter="dark" aria-pressed="false">Dark</button><button data-filter="screenshot" aria-pressed="false">Screenshots</button><button data-filter="duplicate" aria-pressed="false">Duplicates</button><button data-filter="highres" aria-pressed="false">High-res</button><button data-filter="compressed" aria-pressed="false">Compressed</button></div><select id="sort"><option value="time">Sort by time</option><option value="blur">Blur score</option><option value="brightness">Brightness</option><option value="resolution">Resolution</option><option value="filesize">File size</option><option value="similarity">Similarity</option></select></div></div></header>
   <main><div class="grid" id="grid"></div><p class="empty" id="empty" hidden>No media in this view.</p></main>
-  <dialog id="viewer"><div class="viewer"><div class="viewer-bar"><div class="viewer-title" id="viewer-title"></div><div class="viewer-actions"><button class="nav" id="prev" type="button" aria-label="Previous media">Prev</button><button class="nav" id="next" type="button" aria-label="Next media">Next</button><button class="close" id="close" type="button">Close</button></div></div><div><div class="preview-tabs" id="preview-tabs"></div><div class="stage" id="stage"></div></div><div><details class="analysis" id="analysis-panel"><summary>Image analysis</summary><div class="analysis-grid" id="analysis-grid"></div></details><p class="caption" id="caption"></p></div></div></dialog>
+  <dialog id="viewer"><div class="viewer"><div class="viewer-bar"><div class="viewer-title" id="viewer-title"></div><div class="viewer-actions"><button class="nav" id="prev" type="button" aria-label="Previous media">Prev</button><button class="nav" id="next" type="button" aria-label="Next media">Next</button><button class="close" id="close" type="button">Close</button></div></div><div class="viewer-content"><div class="preview-tabs" id="preview-tabs"></div><div class="stage" id="stage"></div></div><div><details class="analysis" id="analysis-panel"><summary>Image analysis</summary><div class="analysis-grid" id="analysis-grid"></div></details><p class="caption" id="caption"></p></div></div></dialog>
   <script type="application/json" id="gallery-data">${payload}</script>
   <script>
     const data = JSON.parse(document.getElementById('gallery-data').textContent);
@@ -91,6 +94,7 @@ export function renderGallery(items: MediaGalleryItem[], mediaToken: string | un
     const mediaUrl = item => '/media/' + encodeURIComponent(item.groupId) + '/' + encodeURIComponent(item.id) + tokenSuffix;
     const previewUrl = (item, kind) => '/api/image-analysis/' + encodeURIComponent(item.groupId) + '/' + encodeURIComponent(item.id) + '/preview/' + encodeURIComponent(kind) + tokenSuffix;
     const visualType = item => item.type === 'image' || item.type === 'sticker' ? 'image' : item.type;
+    const senderLabel = item => item.senderName || (item.sender ? item.sender.split('@')[0] : '') || 'Unknown sender';
     const formatTime = value => new Intl.DateTimeFormat(undefined, { dateStyle:'medium', timeStyle:'short' }).format(new Date(value));
     const number = value => Number.isFinite(Number(value)) ? Number(value) : 0;
     const fmt = (value, digits = 1) => Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : 'Pending';
@@ -148,7 +152,7 @@ export function renderGallery(items: MediaGalleryItem[], mediaToken: string | un
       if (kind === 'document') media.title = item.fileName || item.text || 'PDF document';
       else media.alt = previewKind === 'original' ? (item.text || kind) : previewKind + ' preview';
       stage.append(media);
-      viewerTitle.textContent = (item.fileName ? item.fileName + ' - ' : '') + formatTime(item.timestamp) + ' (' + (index + 1) + '/' + visibleItems.length + ')';
+      viewerTitle.textContent = senderLabel(item) + ' - ' + (item.fileName ? item.fileName + ' - ' : '') + formatTime(item.timestamp) + ' (' + (index + 1) + '/' + visibleItems.length + ')';
       caption.textContent = item.text || '';
       renderPreviewTabs(item, previewKind);
       renderAnalysis(item);
@@ -170,7 +174,7 @@ export function renderGallery(items: MediaGalleryItem[], mediaToken: string | un
       visibleItems.forEach((item, index) => {
         const kind = visualType(item);
         const tile = document.createElement('button');
-        tile.className = 'tile'; tile.type = 'button'; tile.setAttribute('aria-label', 'Open ' + kind + ' from ' + formatTime(item.timestamp));
+        tile.className = 'tile'; tile.type = 'button'; tile.setAttribute('aria-label', 'Open ' + kind + ' from ' + senderLabel(item) + ' at ' + formatTime(item.timestamp));
         const media = kind === 'document' ? document.createElement('span') : document.createElement(kind === 'video' ? 'video' : 'img');
         if (kind === 'document') { media.className = 'document-preview'; media.textContent = 'PDF'; }
         else { media.dataset.src = mediaUrl(item); media.alt = item.text || kind; }
@@ -178,8 +182,9 @@ export function renderGallery(items: MediaGalleryItem[], mediaToken: string | un
         const badges = analysisBadges(item);
         const meta = document.createElement('span'); meta.className = 'meta';
         const badge = document.createElement('span'); badge.className = 'kind ' + kind; badge.textContent = kind;
+        const sender = document.createElement('span'); sender.className = 'sender'; sender.textContent = senderLabel(item); sender.title = senderLabel(item);
         const time = document.createElement('time'); time.textContent = formatTime(item.timestamp);
-        meta.append(badge, time); tile.append(media, badges, meta); tile.addEventListener('click', () => openItem(index));
+        meta.append(badge, sender, time); tile.append(media, badges, meta); tile.addEventListener('click', () => openItem(index));
         grid.append(tile); if (kind !== 'document') observer.observe(tile);
       });
     }

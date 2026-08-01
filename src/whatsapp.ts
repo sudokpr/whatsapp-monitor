@@ -3,6 +3,7 @@ import makeWASocket, {
   fetchLatestBaileysVersion,
   type GroupMetadata,
   type WAMessage,
+  WAMessageStubType,
   useMultiFileAuthState,
 } from "@whiskeysockets/baileys";
 import {
@@ -42,6 +43,13 @@ export interface StoredMessage {
   replyTo?: StoredReply;
 }
 
+export interface StoredMessageDeletion {
+  id: string;
+  groupId: string;
+  deletedAt: number;
+  deletedBy?: string;
+}
+
 export interface StoredReply {
   id: string;
   sender?: string;
@@ -74,6 +82,8 @@ export interface MediaGalleryItem {
   id: string;
   groupId: string;
   groupName: string;
+  sender: string;
+  senderName?: string;
   timestamp: number;
   text: string;
   type: StoredMedia["type"];
@@ -88,6 +98,7 @@ export class WhatsappMonitor {
 
   private readonly watchlist = new WatchlistService();
   private readonly messages: StoredMessage[] = [];
+  private readonly deletedMessageKeys = new Set<string>();
   private readonly groups = new Map<string, DiscoveredGroup>();
   private readonly groupMetadataCache = new Map<string, GroupMetadata>();
   private _sock: ReturnType<typeof makeWASocket> | null = null;
@@ -110,6 +121,14 @@ export class WhatsappMonitor {
       cachedGroupMetadata: async (groupId) =>
         this.groupMetadataCache.get(groupId),
     });
+
+    // Load deletion tombstones before messages so revoked content stays hidden
+    // after restarts.
+    try {
+      await this.loadPersistedDeletions();
+    } catch (e) {
+      console.warn('Could not load persisted message deletions at startup:', e);
+    }
 
     // Load persisted messages into memory so API has history even after restarts
     try {
@@ -171,6 +190,24 @@ export class WhatsappMonitor {
         await this.handleMessage(message, type);
       }
     });
+
+    sock.ev.on("messages.update", async (updates) => {
+      for (const { key, update } of updates) {
+        if (
+          update.messageStubType !== WAMessageStubType.REVOKE
+          || !key.remoteJid
+          || !key.id
+        ) {
+          continue;
+        }
+        await this.softDeleteMessage({
+          id: key.id,
+          groupId: key.remoteJid,
+          deletedAt: Date.now(),
+          deletedBy: key.participant ?? undefined,
+        });
+      }
+    });
   }
 
   getSock(): ReturnType<typeof makeWASocket> | null { return this._sock; }
@@ -194,7 +231,10 @@ export class WhatsappMonitor {
   }
 
   getListings(limit: number): StoredMessage[] {
-    return this.messages.slice(-Math.max(0, limit));
+    return this.messages
+      .filter((message) => !this.isMessageDeleted(message.groupId, message.id))
+      .slice(-Math.max(0, limit))
+      .map((message) => this.hideDeletedReplyText(message));
   }
 
   getMediaGallery(groupId: string, from: number, to: number): MediaGalleryItem[] {
@@ -204,6 +244,7 @@ export class WhatsappMonitor {
         message.groupId !== groupId
         || message.timestamp < from
         || message.timestamp > to
+        || this.isMessageDeleted(message.groupId, message.id)
         || !message.media
         || !isGalleryMedia(message.media)
       ) {
@@ -213,6 +254,8 @@ export class WhatsappMonitor {
         id: message.id,
         groupId: message.groupId,
         groupName: message.groupName,
+        sender: message.sender,
+        senderName: message.senderName,
         timestamp: message.timestamp,
         text: message.text,
         type: message.media.type,
@@ -230,6 +273,7 @@ export class WhatsappMonitor {
       if (
         (groupId && message.groupId !== groupId)
         || (mediaId && message.id !== mediaId)
+        || this.isMessageDeleted(message.groupId, message.id)
         || !message.media
         || !["image", "sticker"].includes(message.media.type)
       ) {
@@ -239,6 +283,8 @@ export class WhatsappMonitor {
         id: message.id,
         groupId: message.groupId,
         groupName: message.groupName,
+        sender: message.sender,
+        senderName: message.senderName,
         timestamp: message.timestamp,
         text: message.text,
         type: message.media.type,
@@ -401,7 +447,9 @@ export class WhatsappMonitor {
       const parsed = lines.map((l) => {
         try { return JSON.parse(l) as StoredMessage; } catch { return null; }
       }).filter((x): x is StoredMessage => x !== null);
-      const tail = parsed.slice(-limit);
+      const tail = parsed
+        .filter((message) => !this.isMessageDeleted(message.groupId, message.id))
+        .slice(-limit);
       this.messages.push(...tail);
       for (const m of tail) {
         this.stats.record(m);
@@ -411,6 +459,65 @@ export class WhatsappMonitor {
     } catch (e: any) {
       if (e.code !== 'ENOENT') console.warn('Failed to load persisted messages:', e);
     }
+  }
+
+  private async loadPersistedDeletions(): Promise<void> {
+    const deletionsPath = path.join(dataDir, 'deleted-messages.jsonl');
+    try {
+      const raw = await readFile(deletionsPath, 'utf8');
+      for (const line of raw.split('\n').filter(Boolean)) {
+        try {
+          const deletion = JSON.parse(line) as Partial<StoredMessageDeletion>;
+          if (deletion.groupId && deletion.id) {
+            this.deletedMessageKeys.add(messageKey(deletion.groupId, deletion.id));
+          }
+        } catch {
+          continue;
+        }
+      }
+      console.log(`Loaded ${this.deletedMessageKeys.size} message deletion tombstones from ${deletionsPath}`);
+    } catch (e: any) {
+      if (e.code !== 'ENOENT') console.warn('Failed to load persisted message deletions:', e);
+    }
+  }
+
+  private async softDeleteMessage(deletion: StoredMessageDeletion): Promise<void> {
+    const key = messageKey(deletion.groupId, deletion.id);
+    if (this.deletedMessageKeys.has(key)) {
+      return;
+    }
+
+    const deletionsPath = path.join(dataDir, 'deleted-messages.jsonl');
+    this.deletedMessageKeys.add(key);
+    try {
+      await appendFile(deletionsPath, `${JSON.stringify(deletion)}\n`, 'utf8');
+      console.log(`Soft-deleted message ${deletion.id} from ${deletion.groupId}.`);
+    } catch (error) {
+      this.deletedMessageKeys.delete(key);
+      console.error(`Failed to persist deletion for message ${deletion.id}:`, error);
+    }
+  }
+
+  private isMessageDeleted(groupId: string, messageId: string): boolean {
+    return this.deletedMessageKeys.has(messageKey(groupId, messageId));
+  }
+
+  private hideDeletedReplyText(message: StoredMessage): StoredMessage {
+    if (
+      !message.replyTo
+      || !this.isMessageDeleted(message.groupId, message.replyTo.id)
+      || message.replyTo.text === undefined
+    ) {
+      return message;
+    }
+
+    return {
+      ...message,
+      replyTo: {
+        id: message.replyTo.id,
+        sender: message.replyTo.sender,
+      },
+    };
   }
 
   private async appendPersistedMessage(m: StoredMessage): Promise<void> {
@@ -440,6 +547,10 @@ export class WhatsappMonitor {
   }
 
   private async findStoredMessage(groupId: string, messageId: string): Promise<StoredMessage | null> {
+    if (this.isMessageDeleted(groupId, messageId)) {
+      return null;
+    }
+
     const buffered = [...this.messages].reverse().find((message) =>
       message.groupId === groupId && message.id === messageId
     );
@@ -490,6 +601,19 @@ export class WhatsappMonitor {
 
   private async handleMessage(message: WAMessage, upsertType?: string): Promise<void> {
     const remote = message.key.remoteJid;
+    const revoke = extractRevokeTarget(message);
+
+    if (remote && revoke) {
+      this.incrementMessagesReceived("revoke");
+      await this.softDeleteMessage({
+        id: revoke.id,
+        groupId: revoke.groupId ?? remote,
+        deletedAt: timestampToMs(message.messageTimestamp),
+        deletedBy: message.key.participant ?? undefined,
+      });
+      return;
+    }
+
     const media = extractMedia(message);
     const text = extractText(message) ?? mediaPlaceholder(media);
 
@@ -606,6 +730,29 @@ export class WhatsappMonitor {
 
 function isStatusBroadcast(remoteJid: string): boolean {
   return remoteJid === 'status@broadcast';
+}
+
+function messageKey(groupId: string, messageId: string): string {
+  return `${groupId}\t${messageId}`;
+}
+
+function extractRevokeTarget(message: WAMessage): { id: string; groupId?: string } | undefined {
+  const content = normalizeMessageContent(message.message);
+  const protocol = asRecord(content?.protocolMessage);
+  if (!protocol || numberValue(protocol.type) !== 0) {
+    return undefined;
+  }
+
+  const key = asRecord(protocol.key);
+  const id = textValue(key?.id);
+  if (!id) {
+    return undefined;
+  }
+
+  return {
+    id,
+    groupId: textValue(key?.remoteJid),
+  };
 }
 
 function extractText(message: WAMessage): string | undefined {

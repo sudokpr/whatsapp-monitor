@@ -234,6 +234,7 @@ def run_digest():
     for key in (
         "DIGEST_STATE_KEY",
         "MESSAGES_LOG",
+        "DELETED_MESSAGES_LOG",
         "DIGESTS_DB",
         "DIGEST_WINDOW_HOURS",
         "CONTEXT_WINDOW_HOURS",
@@ -244,6 +245,7 @@ def run_digest():
 
     os.environ["DIGEST_STATE_KEY"] = STATE_KEY
     os.environ.setdefault("MESSAGES_LOG", str(REPO_DIR / "data" / "messages.jsonl"))
+    os.environ.setdefault("DELETED_MESSAGES_LOG", str(REPO_DIR / "data" / "deleted-messages.jsonl"))
     os.environ.setdefault("DIGESTS_DB", DIGESTS_DB)
 
     stdout = io.StringIO()
