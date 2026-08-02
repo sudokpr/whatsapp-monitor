@@ -15,6 +15,7 @@ fi
 TASK_DIR="$SCRIPT_DIR"
 STATE_FILE="$DATA_DIR/state.json"
 MESSAGES_LOG="${MESSAGES_LOG:-$DATA_DIR/messages.jsonl}"
+DELETED_MESSAGES_LOG="${DELETED_MESSAGES_LOG:-$DATA_DIR/deleted-messages.jsonl}"
 DIGESTS_DB="${DIGESTS_DB:-$DATA_DIR/digests.db}"
 
 # API endpoints

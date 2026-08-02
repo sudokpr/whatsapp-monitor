@@ -13,11 +13,17 @@ from collections import defaultdict
 from pathlib import Path
 
 from input_guardrails import guard_message_text
+from deletions import (
+    exclude_deleted_messages,
+    hide_deleted_reply_text,
+    load_deleted_message_keys,
+)
 
 # Get config from environment. Keep defaults aligned with config.sh so direct
 # invocations read the live whatsapp-group-monitor persistence file.
 repo_dir = Path(__file__).resolve().parents[2]
 messages_log = os.environ.get('MESSAGES_LOG') or str(repo_dir / 'data' / 'messages.jsonl')
+deleted_messages_log = os.environ.get('DELETED_MESSAGES_LOG') or str(repo_dir / 'data' / 'deleted-messages.jsonl')
 db_path = os.environ.get('DIGESTS_DB') or str(repo_dir / 'data' / 'digests.db')
 window_hours = int(os.environ.get('DIGEST_WINDOW_HOURS', 3))
 context_window_hours = int(os.environ.get('CONTEXT_WINDOW_HOURS', window_hours))
@@ -110,6 +116,10 @@ try:
                 print(f"Warning: Skipping invalid JSON at {messages_log}:{line_number}: {e}", file=sys.stderr)
 except FileNotFoundError:
     print(f"Warning: Messages log not found: {messages_log}", file=sys.stderr)
+
+deleted_message_keys = load_deleted_message_keys(deleted_messages_log)
+all_msgs = exclude_deleted_messages(all_msgs, deleted_message_keys)
+all_msgs = hide_deleted_reply_text(all_msgs, deleted_message_keys)
 
 recent_msgs = [m for m in all_msgs if message_timestamp(m) > effective_start_ts]
 recent_msgs.sort(key=message_timestamp)
@@ -501,6 +511,7 @@ digest_metadata = {
     'last_processed_ts': last_processed_ts,
     'last_message_ts': last_message_ts,
     'messages_log': messages_log,
+    'deleted_messages_log': deleted_messages_log,
     'message_count': len(recent_msgs),
     'group_count': len(by_group),
     'context_count': context_count,
